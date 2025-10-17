@@ -1103,28 +1103,8 @@ export class UCloudEnhancer {
   }
 
   async createUnifiedHomeworkView(assignments) {
-    // 等待原有作业区域加载，必要时退回到 home-left 容器
-    let hostSection = null;
-    try {
-    hostSection = await Utils.wait(
-      () =>
-        document.querySelector('.in-progress-section') ||
-        document.querySelector('.home-left-container.home-inline-block') ||
-        document.querySelector('.home-left-container'),
-      {
-        timeout: 7000,
-        observerOptions: { childList: true, subtree: true },
-        label: 'homework-in-progress-section',
-        logTimeout: false,
-      }
-    );
-    } catch (error) {
-    LOG.warn('未能在限定时间内找到 in-progress-section，使用 fallback 容器:', error);
-    hostSection =
-      document.querySelector('.in-progress-section') ||
-      document.querySelector('.home-left-container.home-inline-block') ||
-      document.querySelector('.home-left-container');
-    }
+    // 等待原有作业区域加载
+    await Utils.wait(() => document.querySelector('.in-progress-section'), 5000);
 
     try {
     // 调试：打印完整的assignments数据
@@ -1176,37 +1156,22 @@ export class UCloudEnhancer {
     }
 
     // 创建统一作业视图
-    this.insertUnifiedHomeworkPanel(filteredAssignments, courseInfos, hostSection);
+    this.insertUnifiedHomeworkPanel(filteredAssignments, courseInfos);
     } catch (error) {
     LOG.error('Create unified homework view error:', error);
     this.showHomeworkError('作业数据加载失败');
     }
   }
 
-  insertUnifiedHomeworkPanel(assignments, courseInfos, hostSection = null) {
+  insertUnifiedHomeworkPanel(assignments, courseInfos) {
     const existingPanel = document.getElementById('unified-homework-panel');
     if (existingPanel) {
     this.refreshUnifiedHomeworkPanel(existingPanel, assignments, courseInfos);
     return;
     }
 
-    const hostCandidate =
-    hostSection instanceof Element && hostSection.matches('.in-progress-section')
-      ? hostSection
-      : document.querySelector('.in-progress-section');
-
-    const containerParent =
-    (hostCandidate && hostCandidate.parentElement) ||
-    (hostSection instanceof Element && !hostSection.matches('.in-progress-section')
-      ? hostSection
-      : null) ||
-    document.querySelector('.home-left-container.home-inline-block') ||
-    document.querySelector('.home-left-container');
-
-    if (!containerParent) {
-    LOG.warn('未找到可插入统一作业面板的容器，跳过统一作业视图渲染');
-    return;
-    }
+    const inProgressSection = document.querySelector('.in-progress-section');
+    if (!inProgressSection) return;
 
     // 不再需要保存原始作业项，直接使用URL跳转
 
@@ -1240,15 +1205,8 @@ export class UCloudEnhancer {
     <div class="unified-homework-list"></div>
     `;
 
-    if (hostCandidate && hostCandidate.parentNode) {
-    hostCandidate.parentNode.replaceChild(unifiedPanel, hostCandidate);
-    } else if (containerParent instanceof HTMLElement) {
-    containerParent.insertAdjacentElement('afterbegin', unifiedPanel);
-    } else if (containerParent.parentNode) {
-    containerParent.parentNode.insertBefore(unifiedPanel, containerParent);
-    } else {
-    document.body.appendChild(unifiedPanel);
-    }
+    // 完全替换整个section
+    inProgressSection.parentNode.replaceChild(unifiedPanel, inProgressSection);
 
     // 添加样式
     this.addUnifiedHomeworkStyles();
