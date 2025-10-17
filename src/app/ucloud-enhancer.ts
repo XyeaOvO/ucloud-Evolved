@@ -55,6 +55,10 @@ export class UCloudEnhancer {
   this._autoCloseHandle = null;
   }
 
+  isHomeworkTrashEnabled() {
+    return Settings.get('home', 'enableHomeworkTrash') !== false;
+  }
+
   isCourseRoute(url = location.href) {
     if (typeof url !== 'string') return false;
     return /uclass\/(?:index\.html)?#\//.test(url);
@@ -1184,6 +1188,15 @@ export class UCloudEnhancer {
     // 不再需要保存原始作业项，直接使用URL跳转
 
     // 创建新的统一视图容器，完全替换原来的section
+    const enableTrash = this.isHomeworkTrashEnabled();
+    const trashButtonHtml = enableTrash
+      ? `
+      <div class="trash-bin-info" id="trash-bin-btn" title="查看回收站">
+        ${SVG_ICONS.trashCan}
+        <span id="trash-count">回收站</span>
+      </div>`
+      : '';
+
     const unifiedPanel = document.createElement('div');
     unifiedPanel.id = 'unified-homework-panel';
     unifiedPanel.className = 'unified-homework-container';
@@ -1195,10 +1208,7 @@ export class UCloudEnhancer {
     </div>
     <div class="unified-homework-actions">
       <div class="homework-count" id="homework-count">共 ${assignments.length} 项作业</div>
-      <div class="trash-bin-info" id="trash-bin-btn" title="查看回收站">
-        ${SVG_ICONS.trashCan}
-        <span id="trash-count">回收站</span>
-      </div>
+      ${trashButtonHtml}
     </div>
     </div>
     <div class="search-container">
@@ -1441,12 +1451,14 @@ export class UCloudEnhancer {
     badge.textContent = `${typeLabel} - ${statusText}`;
     card.appendChild(badge);
 
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'homework-delete-btn';
-    deleteBtn.dataset.assignmentId = String(assignment.activityId ?? '');
-    deleteBtn.title = '移除作业';
-    deleteBtn.innerHTML = SVG_ICONS.homeworkDelete;
-    card.appendChild(deleteBtn);
+    if (this.isHomeworkTrashEnabled()) {
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'homework-delete-btn';
+      deleteBtn.dataset.assignmentId = String(assignment.activityId ?? '');
+      deleteBtn.title = '移除作业';
+      deleteBtn.innerHTML = SVG_ICONS.homeworkDelete;
+      card.appendChild(deleteBtn);
+    }
 
     return card;
   }

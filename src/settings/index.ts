@@ -64,6 +64,12 @@ export const SETTINGS_SECTIONS: SettingSection[] = [
           "删除作业时跳过确认对话框，直接移入回收站。可以提高操作效率，但需要小心操作。",
       },
       {
+        key: "enableHomeworkTrash",
+        default: true,
+        label: "启用作业回收站",
+        description: "提供作业删除回收站和恢复功能，关闭后将隐藏删除按钮。",
+      },
+      {
         type: "action",
         buttonId: "clear-deleted-homeworks-btn",
         buttonText: "清空作业回收站",
