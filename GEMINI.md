@@ -27,3 +27,5 @@ This is a UserScript, so there is no build process. To use or develop this scrip
 *   The script uses modern JavaScript features like `async/await`, `class`, and `const/let`.
 *   The code is organized into classes for managing different aspects of the script's functionality, such as `Utils`, `Storage`, `API`, `DownloadManager`, `NotificationManager`, and `CourseExtractor`.
 *   There is a `SETTINGS_SECTIONS` constant that defines the configuration options for the script, which are then managed by the `Settings` class.
+*   完成任意一个需求后，记得在 `ucloud-evolved-plus-optimization.md` 中勾选对应的需求项。
+*   每次进行任何改动（即便是极小的调整）都需要立即提交一次 commit，保持变更可追溯。
