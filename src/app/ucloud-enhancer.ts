@@ -1103,8 +1103,12 @@ export class UCloudEnhancer {
   }
 
   async createUnifiedHomeworkView(assignments) {
-    // 等待原有作业区域加载
-    await Utils.wait(() => document.querySelector('.in-progress-section'), 5000);
+    const hostSection = await this.resolveHomeworkHost();
+    if (!hostSection) {
+    LOG.warn('未找到作业面板的挂载容器');
+    this.showHomeworkError('作业区域未准备好，请稍后再试');
+    return;
+    }
 
     try {
     // 调试：打印完整的assignments数据
@@ -1156,22 +1160,31 @@ export class UCloudEnhancer {
     }
 
     // 创建统一作业视图
-    this.insertUnifiedHomeworkPanel(filteredAssignments, courseInfos);
+    this.insertUnifiedHomeworkPanel(filteredAssignments, courseInfos, hostSection);
     } catch (error) {
     LOG.error('Create unified homework view error:', error);
     this.showHomeworkError('作业数据加载失败');
     }
   }
 
-  insertUnifiedHomeworkPanel(assignments, courseInfos) {
+  insertUnifiedHomeworkPanel(assignments, courseInfos, hostSection = null) {
     const existingPanel = document.getElementById('unified-homework-panel');
     if (existingPanel) {
     this.refreshUnifiedHomeworkPanel(existingPanel, assignments, courseInfos);
     return;
     }
 
-    const inProgressSection = document.querySelector('.in-progress-section');
-    if (!inProgressSection) return;
+    const targetHost =
+    hostSection instanceof Element
+      ? hostSection
+      : document.querySelector('.in-progress-section') ||
+        document.querySelector('.home-left-container.home-inline-block') ||
+        document.querySelector('.home-left-container');
+
+    if (!targetHost) {
+    LOG.warn('未找到作业面板的挂载位置，放弃渲染统一作业视图');
+    return;
+    }
 
     // 不再需要保存原始作业项，直接使用URL跳转
 
@@ -1205,8 +1218,15 @@ export class UCloudEnhancer {
     <div class="unified-homework-list"></div>
     `;
 
-    // 完全替换整个section
-    inProgressSection.parentNode.replaceChild(unifiedPanel, inProgressSection);
+    if (targetHost instanceof Element && targetHost.matches('.in-progress-section') && targetHost.parentNode) {
+    targetHost.parentNode.replaceChild(unifiedPanel, targetHost);
+    } else if (targetHost instanceof HTMLElement) {
+    targetHost.insertAdjacentElement('afterbegin', unifiedPanel);
+    } else if (targetHost.parentNode) {
+    targetHost.parentNode.insertBefore(unifiedPanel, targetHost);
+    } else {
+    document.body.appendChild(unifiedPanel);
+    }
 
     // 添加样式
     this.addUnifiedHomeworkStyles();
@@ -1827,6 +1847,38 @@ export class UCloudEnhancer {
     }
     `);
     this._homeworkSkeletonStylesInjected = true;
+  }
+
+  async resolveHomeworkHost() {
+    const selectors = [
+    '.in-progress-section',
+    '.home-left-container.home-inline-block',
+    '.home-left-container',
+    ];
+
+    try {
+    const host = await Utils.wait(() => {
+      for (const selector of selectors) {
+      const element = document.querySelector(selector);
+      if (element) return element;
+      }
+      return null;
+    }, {
+      timeout: 7000,
+      observerOptions: { childList: true, subtree: true },
+      label: 'homework-host',
+      logTimeout: false,
+    });
+    if (host) return host;
+    } catch (error) {
+    LOG.warn('等待作业宿主容器超时，尝试使用降级容器:', error);
+    }
+
+    for (const selector of selectors) {
+    const fallback = document.querySelector(selector);
+    if (fallback) return fallback;
+    }
+    return null;
   }
 
   openAssignmentDetails(assignmentId, title, type) {
