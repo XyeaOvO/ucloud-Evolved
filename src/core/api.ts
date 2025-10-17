@@ -537,6 +537,13 @@ export class API {
   }
 
   static async getCurrentCourses(forceRefresh = false): Promise<RawCourse[]> {
+    if (!forceRefresh) {
+      const cached = this._courseListCache;
+      if (cached && cached.length) {
+        return [...cached];
+      }
+    }
+
     try {
       const list = await this._getCourseList(forceRefresh);
       return Array.isArray(list) ? [...list] : [];
