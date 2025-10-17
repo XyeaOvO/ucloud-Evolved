@@ -20,6 +20,8 @@ export class UCloudEnhancer {
   private _settingsPanel: HTMLElement | null;
   private _settingsInitialized: boolean;
   private _homeworkStylesInjected: boolean;
+  private _homeworkSkeletonCleanup: (() => void) | null;
+  private _homeworkSkeletonStylesInjected: boolean;
   private _injectedStyles: Set<string>;
   private _themeActive: boolean;
   private _unlockCopyBound: boolean;
@@ -40,6 +42,8 @@ export class UCloudEnhancer {
   this._settingsPanel = null;
   this._settingsInitialized = false;
   this._homeworkStylesInjected = false;
+  this._homeworkSkeletonCleanup = null;
+  this._homeworkSkeletonStylesInjected = false;
   this._injectedStyles = new Set();
   this._themeActive = false;
   this._unlockCopyBound = false;
@@ -702,15 +706,86 @@ export class UCloudEnhancer {
 
     if (!enableNewView) return;
 
+    this.renderUnifiedHomeworkSkeleton();
+
     try {
     const undoneList = await API.getUndoneList() as UndoneListResponse;
     const assignments = undoneList.data?.undoneList;
-    if (!assignments?.length) return;
+    if (!assignments?.length) {
+      this.showHomeworkError('暂无待办作业');
+      return;
+    }
 
     // 创建统一的作业显示视图
     await this.createUnifiedHomeworkView(assignments);
+    this.clearHomeworkSkeleton();
     } catch (error) {
     LOG.error('Handle home page error:', error);
+    this.showHomeworkError('作业数据加载失败');
+    }
+  }
+
+  renderUnifiedHomeworkSkeleton(count = 4) {
+    if (this._homeworkSkeletonCleanup) return;
+
+    let panel = document.getElementById('unified-homework-panel');
+    if (!panel) {
+      this.insertUnifiedHomeworkPanel([], {});
+      panel = document.getElementById('unified-homework-panel');
+    }
+    if (!panel) return;
+
+    this.addUnifiedHomeworkStyles();
+    this.addHomeworkSkeletonStyles();
+
+    panel.classList.add('is-skeleton');
+    const countLabel = panel.querySelector('#homework-count');
+    if (countLabel) {
+      countLabel.textContent = '加载中…';
+    }
+    const list = panel.querySelector('.unified-homework-list');
+    if (list instanceof HTMLElement) {
+      const placeholders = Array.from({ length: count })
+        .map(
+          () => `
+            <div class="homework-skeleton-card">
+              <div class="homework-skeleton-line wide"></div>
+              <div class="homework-skeleton-line medium"></div>
+              <div class="homework-skeleton-line short"></div>
+            </div>
+          `
+        )
+        .join('');
+      list.innerHTML = placeholders;
+    }
+
+    const cleanup = () => {
+      if (panel) {
+        panel.classList.remove('is-skeleton');
+        const listEl = panel.querySelector('.unified-homework-list');
+        if (listEl instanceof HTMLElement) {
+          listEl.querySelectorAll('.homework-skeleton-card').forEach((item) => item.remove());
+        }
+      }
+      this._homeworkSkeletonCleanup = null;
+    };
+
+    this._homeworkSkeletonCleanup = cleanup;
+  }
+
+  clearHomeworkSkeleton() {
+    if (typeof this._homeworkSkeletonCleanup === 'function') {
+      this._homeworkSkeletonCleanup();
+    }
+  }
+
+  showHomeworkError(message) {
+    this.clearHomeworkSkeleton();
+    const panel = document.getElementById('unified-homework-panel');
+    if (!panel) return;
+    const list = panel.querySelector('.unified-homework-list');
+    if (list instanceof HTMLElement) {
+      list.innerHTML = `<div class="homework-error">${Utils.escapeHtml(message)}</div>`;
     }
   }
 
@@ -1092,6 +1167,7 @@ export class UCloudEnhancer {
     this.insertUnifiedHomeworkPanel(filteredAssignments, courseInfos);
     } catch (error) {
     LOG.error('Create unified homework view error:', error);
+    this.showHomeworkError('作业数据加载失败');
     }
   }
 
@@ -1695,6 +1771,62 @@ export class UCloudEnhancer {
     .unified-homework-card:nth-child(n+6) { animation-delay: 0.35s; }
     `);
     this._homeworkStylesInjected = true;
+  }
+
+  addHomeworkSkeletonStyles() {
+    if (this._homeworkSkeletonStylesInjected) return;
+    GM_addStyle(`
+    .unified-homework-container.is-skeleton .unified-homework-actions,
+    .unified-homework-container.is-skeleton .search-container {
+      opacity: 0.6;
+    }
+
+    .homework-skeleton-card {
+      position: relative;
+      overflow: hidden;
+      background: #f5f7fa;
+      border: 1px solid #ebeef5;
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 110px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .homework-skeleton-line {
+      height: 12px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #f0f1f5 25%, #e6e7ec 50%, #f0f1f5 75%);
+      background-size: 200% 100%;
+      animation: skeleton-shimmer 1.4s ease infinite;
+    }
+
+    .homework-skeleton-line.wide {
+      width: 80%;
+    }
+
+    .homework-skeleton-line.medium {
+      width: 60%;
+    }
+
+    .homework-skeleton-line.short {
+      width: 40%;
+    }
+
+    @keyframes skeleton-shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    .homework-error {
+      padding: 32px;
+      text-align: center;
+      color: #909399;
+      font-size: 14px;
+    }
+    `);
+    this._homeworkSkeletonStylesInjected = true;
   }
 
   openAssignmentDetails(assignmentId, title, type) {
