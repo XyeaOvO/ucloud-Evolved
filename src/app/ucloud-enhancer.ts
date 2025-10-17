@@ -6,6 +6,8 @@ import { Settings, SETTINGS_SECTIONS } from "../settings";
 import { DownloadManager } from "../services/download-manager";
 import { CourseExtractor } from "../services/course-extractor";
 import { NotificationManager } from "../services/notification-manager";
+import { isCourseRoute, isNotificationRoute } from "./routing";
+import { isHomeworkTrashEnabled } from "./homework-utils";
 import { API, AssignmentSummary, UndoneListResponse } from "../core/api";
 import { Storage, StoredCourseInfo } from "../core/storage";
 
@@ -53,20 +55,6 @@ export class UCloudEnhancer {
   this._simplifyStylesInjected = false;
   this._homeSimplifyCleanup = null;
   this._autoCloseHandle = null;
-  }
-
-  isHomeworkTrashEnabled() {
-    return Settings.get('home', 'enableHomeworkTrash') !== false;
-  }
-
-  isCourseRoute(url = location.href) {
-    if (typeof url !== 'string') return false;
-    return /uclass\/(?:index\.html)?#\//.test(url);
-  }
-
-  isNotificationRoute(url = location.href) {
-    if (typeof url !== 'string') return false;
-    return url.includes('/set/notice') || url.includes('/notice_fullpage');
   }
 
   init() {
@@ -572,13 +560,13 @@ export class UCloudEnhancer {
 
 
     // 通知页面
-    if (this.isNotificationRoute(url)) {
+    if (isNotificationRoute(url)) {
     this.handleNotificationPage();
     return;
     }
 
     // 学生课程页面 - 新增处理课程列表页面
-    if (this.isCourseRoute(url) && !this.isNotificationRoute(url)) {
+    if (isCourseRoute(url) && !isNotificationRoute(url)) {
     await this.handleCoursesPage();
     return;
     }
@@ -1188,7 +1176,7 @@ export class UCloudEnhancer {
     // 不再需要保存原始作业项，直接使用URL跳转
 
     // 创建新的统一视图容器，完全替换原来的section
-    const enableTrash = this.isHomeworkTrashEnabled();
+    const enableTrash = isHomeworkTrashEnabled();
     const trashButtonHtml = enableTrash
       ? `
       <div class="trash-bin-info" id="trash-bin-btn" title="查看回收站">
@@ -1451,7 +1439,7 @@ export class UCloudEnhancer {
     badge.textContent = `${typeLabel} - ${statusText}`;
     card.appendChild(badge);
 
-    if (this.isHomeworkTrashEnabled()) {
+    if (isHomeworkTrashEnabled()) {
       const deleteBtn = document.createElement('button');
       deleteBtn.className = 'homework-delete-btn';
       deleteBtn.dataset.assignmentId = String(assignment.activityId ?? '');
@@ -4275,10 +4263,10 @@ export class UCloudEnhancer {
     }
 
     // 增加更严格的页面检查，确保真正在课程页面上
-    const isReallyCoursePage = this.isCourseRoute();
+    const isReallyCoursePage = isCourseRoute();
 
     // 检查是否为通知页面
-    const isNotificationPage = this.isNotificationRoute();
+    const isNotificationPage = isNotificationRoute();
 
     if (!isReallyCoursePage || isNotificationPage) {
     return;
@@ -4322,7 +4310,7 @@ export class UCloudEnhancer {
     }
     this._courseExtractorRetryTimer = window.setTimeout(async () => {
       this._courseExtractorRetryTimer = null;
-      if (!this.isCourseRoute() || this.isNotificationRoute()) return;
+      if (!isCourseRoute() || isNotificationRoute()) return;
       const retrySuccess = await this.courseExtractor.extractCourses({ force: true });
       if (retrySuccess) {
         const displaySuccess = this.courseExtractor.displayCourses();
