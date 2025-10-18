@@ -26,6 +26,7 @@ export class UCloudEnhancer {
   private _imageViewerCleanup: (() => void) | null;
   private _courseExtractorRetryTimer: number | null;
   private _notificationMarkReadHandler: ((event: Event) => void) | null;
+  private _notificationObserver: MutationObserver | null;
   private _simplifyStylesInjected: boolean;
   private _homeSimplifyCleanup: (() => void) | null;
   private _autoCloseHandle: MutationObserver | null;
@@ -43,7 +44,7 @@ export class UCloudEnhancer {
         getState: () => this.getClearDeletedHomeworkButtonState(),
       },
     },
-    onSave: () => this.handleSettingsSaved(),
+    onSave: (changes) => this.handleSettingsSaved(changes),
   });
   this.currentPage = location.href;
   this.observers = new Set();
@@ -54,6 +55,7 @@ export class UCloudEnhancer {
   this._imageViewerCleanup = null;
   this._courseExtractorRetryTimer = null;
   this._notificationMarkReadHandler = null;
+  this._notificationObserver = null;
   this._simplifyStylesInjected = false;
   this._homeSimplifyCleanup = null;
   this._autoCloseHandle = null;
@@ -61,6 +63,7 @@ export class UCloudEnhancer {
 
   init() {
     Settings.init();
+    this.applyDownloadConcurrency();
     this.loadStyles();
     this.createUI();
     this.registerMenuCommands();
@@ -1396,6 +1399,7 @@ export class UCloudEnhancer {
     }
     });
     this.observers.clear();
+    this._notificationObserver = null;
     }
     if (this._courseExtractorRetryTimer) {
     clearTimeout(this._courseExtractorRetryTimer);
@@ -1908,7 +1912,7 @@ export class UCloudEnhancer {
     }
     });
 
-    const zipName = Utils.sanitizeFilename(`${courseName || '课程资源'}-${Utils.formatDateForFilename()}.zip`);
+    const zipName = this.resolveZipFilename(courseName);
     this.downloadManager.saveBlob(blob, zipName);
     NotificationManager.show('打包完成', `成功打包 ${entries.length} 个文件`);
     return 'success';
@@ -1927,7 +1931,9 @@ export class UCloudEnhancer {
 
   async runLegacyBatchDownload(resources) {
     const useGM = typeof GM_download === 'function';
-    const concurrency = 1;
+    let concurrency = Number(Settings.get('course', 'downloadConcurrency'));
+    if (!Number.isFinite(concurrency) || concurrency < 1) concurrency = 1;
+    concurrency = Math.min(10, Math.floor(concurrency));
     let nextIndex = 0;
 
     const fetchPreview = async (id) => {
@@ -2071,9 +2077,28 @@ export class UCloudEnhancer {
     this.settingsPanel.refresh();
   }
 
-  private handleSettingsSaved(): void {
-    this.settingsPanel.setToggleVisibility(Settings.get("system", "showConfigButton"));
+  private handleSettingsSaved(changes = []): void {
+    const showToggle = Settings.get("system", "showConfigButton");
+    this.settingsPanel.setToggleVisibility(showToggle);
     this.settingsPanel.refreshAction("clear-deleted-homeworks-btn");
+    let shouldUpdateConcurrency = false;
+    let shouldRefreshNotifications = false;
+    (Array.isArray(changes) ? changes : []).forEach((change) => {
+      if (!change || typeof change !== "object") return;
+      const { category, key } = change;
+      if (category === "course" && key === "downloadConcurrency") {
+        shouldUpdateConcurrency = true;
+      }
+      if (category === "notification" && key === "sortOrder") {
+        shouldRefreshNotifications = true;
+      }
+    });
+    if (shouldUpdateConcurrency) {
+      this.applyDownloadConcurrency();
+    }
+    if (shouldRefreshNotifications && isNotificationRoute()) {
+      this.handleNotificationPage(true);
+    }
     NotificationManager.show("设置已保存", "刷新页面后生效");
   }
 
@@ -2098,6 +2123,40 @@ export class UCloudEnhancer {
       label: `清空作业回收站 (${deletedCount})`,
       disabled: deletedCount === 0,
     };
+  }
+
+  private applyDownloadConcurrency(): void {
+    let concurrency = Number(Settings.get("course", "downloadConcurrency"));
+    if (!Number.isFinite(concurrency)) concurrency = 1;
+    concurrency = Math.max(1, Math.min(10, Math.floor(concurrency)));
+    this.downloadManager.setConcurrency(concurrency);
+  }
+
+  private resolveZipFilename(courseName?: string | null): string {
+    const templateRaw = Settings.get("course", "downloadNameTemplate");
+    const template =
+      typeof templateRaw === "string" && templateRaw.trim().length
+        ? templateRaw.trim()
+        : "{{course}}-{{date}}";
+    const fallbackCourse =
+      courseName && String(courseName).trim() ? String(courseName).trim() : "课程资源";
+    const timestamp = Utils.formatDateForFilename();
+    const replacements: Record<string, string> = {
+      course: fallbackCourse,
+      date: timestamp,
+      timestamp,
+    };
+    let resolved = template;
+    Object.entries(replacements).forEach(([token, value]) => {
+      const pattern = new RegExp(`\\{\\{\\s*${token}\\s*\\}\\}`, "gi");
+      resolved = resolved.replace(pattern, value);
+    });
+    resolved = resolved.replace(/\\{\\{[^}]+\\}\\}/g, "").trim();
+    if (!resolved.length) {
+      resolved = `${fallbackCourse}-${timestamp}`;
+    }
+    const sanitized = Utils.sanitizeFilename(resolved);
+    return sanitized.toLowerCase().endsWith(".zip") ? sanitized : `${sanitized}.zip`;
   }
 
   registerMenuCommands() {
@@ -2203,6 +2262,105 @@ export class UCloudEnhancer {
     this.courseExtractor.toggleOriginalContainer(true);
     }
   }
+
+  handleNotificationPage(forceRefresh = false) {
+    if (forceRefresh && this._notificationObserver) {
+      try {
+        this._notificationObserver.disconnect();
+      } catch (error) {
+        LOG.debug('重置通知观察器失败:', error);
+      }
+      this.observers.delete(this._notificationObserver);
+      this._notificationObserver = null;
+    }
+
+    Utils.wait(
+      () => document.querySelector(CONSTANTS.SELECTORS.notificationList),
+      {
+        timeout: 7000,
+        observerOptions: { childList: true, subtree: true },
+        label: 'notification-list',
+        logTimeout: false,
+      }
+    )
+      .then((list) => {
+        if (!(list instanceof HTMLElement)) return;
+        this.applyNotificationListEnhancements(list);
+
+        if (this._notificationObserver) return;
+        const observer = new MutationObserver(() => {
+          observer.disconnect();
+          this.applyNotificationListEnhancements(list);
+          observer.observe(list, { childList: true, subtree: true });
+        });
+        observer.observe(list, { childList: true, subtree: true });
+        this._notificationObserver = observer;
+        this.observers.add(observer);
+      })
+      .catch((error) => {
+        LOG.debug('处理通知页面失败:', error);
+      });
   }
+
+  private applyNotificationListEnhancements(list: HTMLElement): void {
+    if (!list) return;
+    const items = Array.from(list.children).filter(
+      (child): child is HTMLElement => child instanceof HTMLElement
+    );
+    if (!items.length) return;
+
+    const sortOrder = Settings.get('notification', 'sortOrder') || 'desc';
+    const highlightEnabled = Settings.get('notification', 'betterNotificationHighlight');
+    const sorted = items.map((item, index) => {
+      const timestamp = this.extractNotificationTimestamp(item);
+      return {
+        item,
+        index,
+        timestamp: timestamp ?? (sortOrder === 'asc' ? index : -index),
+      };
+    });
+
+    sorted.sort((a, b) => {
+      if (a.timestamp === b.timestamp) {
+        return sortOrder === 'asc' ? a.index - b.index : b.index - a.index;
+      }
+      return sortOrder === 'asc' ? a.timestamp - b.timestamp : b.timestamp - a.timestamp;
+    });
+
+    sorted.forEach(({ item }) => list.appendChild(item));
+
+    items.forEach((item) => {
+      const dot = item.querySelector(CONSTANTS.SELECTORS.notificationDot);
+      if (highlightEnabled) {
+        item.classList.toggle('notification-with-dot', Boolean(dot));
+      } else {
+        item.classList.remove('notification-with-dot');
+      }
+    });
+  }
+
+  private extractNotificationTimestamp(element: HTMLElement): number | null {
+    try {
+      const timestampNode = element.querySelector(CONSTANTS.SELECTORS.notificationTimestamp);
+      if (timestampNode && timestampNode.textContent) {
+        const parsed = Utils.parseDateFlexible(timestampNode.textContent.trim());
+        if (parsed) return parsed.getTime();
+      }
+      const dataTime =
+        element.getAttribute('data-time') ||
+        element.getAttribute('data-time-ms') ||
+        element.getAttribute('data-timestamp');
+      if (dataTime) {
+        const numeric = Number(dataTime);
+        if (Number.isFinite(numeric)) {
+          return numeric > 1e11 ? numeric : numeric * 1000;
+        }
+      }
+    } catch (error) {
+      LOG.debug('解析通知时间失败:', error);
+    }
+    return null;
+  }
+}
 
   

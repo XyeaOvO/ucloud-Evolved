@@ -237,6 +237,41 @@ ${"#" + PANEL_ID} .setting-description.visible {
   padding: 8px 12px;
 }
 
+${"#" + PANEL_ID} input[type="text"],
+${"#" + PANEL_ID} input[type="password"],
+${"#" + PANEL_ID} input[type="email"],
+${"#" + PANEL_ID} input[type="number"],
+${"#" + PANEL_ID} select {
+  width: 100%;
+  padding: 10px 15px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  font-size: 14px;
+  color: #606266;
+  box-sizing: border-box;
+  transition: all 0.3s;
+  outline: none;
+  background: #fff;
+}
+
+${"#" + PANEL_ID} input[type="text"]:focus,
+${"#" + PANEL_ID} input[type="password"]:focus,
+${"#" + PANEL_ID} input[type="email"]:focus,
+${"#" + PANEL_ID} input[type="number"]:focus,
+${"#" + PANEL_ID} select:focus {
+  border-color: #409EFF;
+  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.12);
+}
+
+${"#" + PANEL_ID} select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, #c0c4cc 50%), linear-gradient(135deg, #c0c4cc 50%, transparent 50%);
+  background-position: calc(100% - 16px) calc(50% - 2px), calc(100% - 11px) calc(50% - 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+
 ${"#" + PANEL_ID} .buttons {
   display: flex;
   justify-content: flex-end;

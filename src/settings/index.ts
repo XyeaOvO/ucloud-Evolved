@@ -191,6 +191,28 @@ export const SETTINGS_SECTIONS: SettingSection[] = [
         description: "将批量下载的课件打包成 Zip 文件，方便集中管理。",
       },
       {
+        key: "downloadConcurrency",
+        valueType: "number",
+        default: 2,
+        min: 1,
+        max: 6,
+        step: 1,
+        label: "下载并发数",
+        description:
+          "控制批量下载时的并发任务数量，较高的并发可提升速度，但可能增加失败或被限制的概率。",
+      },
+      {
+        key: "downloadNameTemplate",
+        valueType: "string",
+        default: "{{course}}-{{date}}",
+        placeholder: "{{course}}-{{date}}",
+        maxLength: 120,
+        trim: true,
+        label: "打包文件命名模板",
+        description:
+          "自定义压缩包命名格式，可使用 {{course}}（课程名）、{{date}}（时间戳）占位符。",
+      },
+      {
         key: "showAllDownloadButton",
         default: false,
         label: "显示所有下载按钮",
@@ -241,6 +263,17 @@ export const SETTINGS_SECTIONS: SettingSection[] = [
         label: "优化未读通知高亮",
         description:
           "增强未读通知的视觉提示，使未读消息更加醒目，不易遗漏重要信息。",
+      },
+      {
+        key: "sortOrder",
+        valueType: "enum",
+        default: "desc",
+        label: "通知排序",
+        description: "按时间顺序展示通知，可选择最新在前或最早在前。",
+        choices: [
+          { value: "desc", label: "最新在前" },
+          { value: "asc", label: "最早在前" },
+        ],
       },
     ],
   },
