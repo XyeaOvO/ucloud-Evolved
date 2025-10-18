@@ -14,21 +14,60 @@ export interface SettingActionOption {
   description?: string;
 }
 
-export type SettingValueType = "boolean" | "string" | "number";
+export type SettingValueType = "boolean" | "string" | "number" | "enum";
 
-export interface SettingToggleOption {
+interface SettingBaseOption<TValue, TValueType extends SettingValueType> {
   key: string;
-  default: boolean;
   label: string;
   description: string;
   category?: SettingCategory;
-  valueType?: SettingValueType;
+  valueType?: TValueType;
+  default: TValue;
   version?: number;
-  migrate?: (storedValue: unknown, storedVersion: number | undefined) => boolean;
+  migrate?: (storedValue: unknown, storedVersion: number | undefined) => TValue;
+}
+
+export interface SettingToggleOption
+  extends SettingBaseOption<boolean, "boolean" | undefined> {
+  valueType?: "boolean";
   type?: undefined;
 }
 
-export type SettingOption = SettingActionOption | SettingToggleOption;
+export interface SettingStringOption
+  extends SettingBaseOption<string, "string"> {
+  valueType: "string";
+  placeholder?: string;
+  maxLength?: number;
+  pattern?: string;
+  trim?: boolean;
+}
+
+export interface SettingNumberOption
+  extends SettingBaseOption<number, "number"> {
+  valueType: "number";
+  min?: number;
+  max?: number;
+  step?: number;
+}
+
+export interface SettingEnumChoice {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+export interface SettingEnumOption
+  extends SettingBaseOption<string, "enum"> {
+  valueType: "enum";
+  choices: SettingEnumChoice[];
+}
+
+export type SettingOption =
+  | SettingActionOption
+  | SettingToggleOption
+  | SettingStringOption
+  | SettingNumberOption
+  | SettingEnumOption;
 
 export interface SettingSection {
   id: SettingCategory;
@@ -234,9 +273,11 @@ export const SETTINGS_SECTIONS: SettingSection[] = [
   },
 ];
 
-type SettingState = Record<string, Record<string, boolean>>;
+export type SettingPrimitive = boolean | string | number;
 
-type SettingDefinitionAny = SettingDefinition<boolean | string | number>;
+type SettingState = Record<string, Record<string, SettingPrimitive>>;
+
+type SettingDefinitionAny = SettingDefinition<SettingPrimitive>;
 
 interface SettingDefinition<T> {
   category: SettingCategory;
@@ -250,7 +291,7 @@ interface SettingDefinition<T> {
 
 class SettingsStore {
   private readonly definitions = new Map<string, SettingDefinitionAny>();
-  private readonly values = new Map<string, unknown>();
+  private readonly values = new Map<string, SettingPrimitive>();
   readonly defaultsByCategory: SettingState;
 
   constructor(definitions: SettingDefinitionAny[]) {
@@ -264,8 +305,7 @@ class SettingsStore {
       if (!defaults[definition.category]) {
         defaults[definition.category] = {};
       }
-      // Currently all settings are boolean, ensure typing aligns with consumers.
-      defaults[definition.category][definition.key] = Boolean(definition.defaultValue);
+      defaults[definition.category][definition.key] = definition.defaultValue as SettingPrimitive;
     });
     Object.keys(defaults).forEach((category) => {
       Object.freeze(defaults[category]);
@@ -282,7 +322,7 @@ class SettingsStore {
     });
   }
 
-  get<T>(category: string, key: string): T {
+  get<T extends SettingPrimitive>(category: string, key: string): T {
     const mapKey = this.composeKey(category, key);
     const definition = this.definitions.get(mapKey);
     if (!definition) {
@@ -294,14 +334,14 @@ class SettingsStore {
     return definition.defaultValue as unknown as T;
   }
 
-  set<T>(category: string, key: string, value: T): void {
+  set<T extends SettingPrimitive>(category: string, key: string, value: T): void {
     const mapKey = this.composeKey(category, key);
     const definition = this.definitions.get(mapKey);
     if (!definition) {
       throw new Error(`Unknown setting: ${category}.${key}`);
     }
     const normalized = definition.normalize(value);
-    this.values.set(mapKey, normalized);
+    this.values.set(mapKey, normalized as SettingPrimitive);
     GM_setValue(this.storageKey(definition), {
       value: normalized,
       version: definition.version,
@@ -314,7 +354,8 @@ class SettingsStore {
       if (!snapshot[definition.category]) {
         snapshot[definition.category] = {};
       }
-      snapshot[definition.category][definition.key] = this.get<boolean>(definition.category, definition.key);
+      const value = this.get<SettingPrimitive>(definition.category, definition.key);
+      snapshot[definition.category][definition.key] = value;
     });
     return snapshot;
   }
@@ -357,43 +398,213 @@ function collectSettingDefinitions(): SettingDefinitionAny[] {
   SETTINGS_SECTIONS.forEach((section) => {
     const defaultCategory = section.defaultCategory;
     section.options.forEach((option) => {
-      if ("type" in option && option.type === "action") return;
-      const category = option.category ?? defaultCategory;
-      const valueType = option.valueType ?? "boolean";
-      if (valueType !== "boolean") {
-        throw new Error(`Unsupported setting type "${valueType}" for ${category}.${option.key}`);
-      }
-      const defaultValue = option.default ?? false;
-      const normalize = (value: unknown): boolean => {
-        if (typeof value === "boolean") return value;
-        if (typeof value === "string") {
-          const normalized = value.trim().toLowerCase();
-          if (normalized === "true" || normalized === "1") return true;
-          if (normalized === "false" || normalized === "0") return false;
-        }
-        if (typeof value === "number") return value !== 0;
-        return defaultValue;
-      };
+      if (isActionOption(option)) return;
 
-      const migrate = option.migrate
-        ? (storedValue: unknown, storedVersion: number | undefined) => {
+      const category = option.category ?? defaultCategory;
+      const optionType = option.valueType ?? "boolean";
+
+      switch (optionType) {
+        case "boolean": {
+          const boolOption = option as SettingToggleOption;
+          const defaultValue = boolOption.default;
+          const normalize = (value: unknown): boolean => {
+            if (typeof value === "boolean") return value;
+            if (typeof value === "string") {
+              const normalized = value.trim().toLowerCase();
+              if (normalized === "true" || normalized === "1") return true;
+              if (normalized === "false" || normalized === "0") return false;
+            }
+            if (typeof value === "number") return value !== 0;
+            return defaultValue;
+          };
+
+          const migrate = boolOption.migrate
+            ? (storedValue: unknown, storedVersion: number | undefined) => {
+                try {
+                  return normalize(boolOption.migrate!(storedValue, storedVersion));
+                } catch {
+                  return defaultValue;
+                }
+              }
+            : undefined;
+
+          definitions.push({
+            category,
+            key: boolOption.key,
+            type: "boolean",
+            defaultValue,
+            version: boolOption.version ?? 1,
+            normalize,
+            migrate,
+          });
+          break;
+        }
+        case "string": {
+          if (!isStringOption(option)) {
+            throw new Error(`Invalid string setting configuration for ${category}.${option.key}`);
+          }
+          const defaultValue = option.default;
+          let pattern: RegExp | null = null;
+          if (option.pattern) {
             try {
-              return option.migrate!(storedValue, storedVersion);
+              pattern = new RegExp(option.pattern);
             } catch {
-              return defaultValue;
+              pattern = null;
             }
           }
-        : undefined;
+          const maxLength =
+            typeof option.maxLength === "number" && option.maxLength > 0
+              ? Math.floor(option.maxLength)
+              : undefined;
+          const trimEnabled = option.trim !== false;
+          const normalize = (value: unknown): string => {
+            let result: string;
+            if (typeof value === "string") {
+              result = value;
+            } else if (value == null) {
+              result = defaultValue;
+            } else {
+              result = String(value);
+            }
+            if (trimEnabled) {
+              result = result.trim();
+            }
+            if (maxLength !== undefined && result.length > maxLength) {
+              result = result.slice(0, maxLength);
+            }
+            if (pattern && !pattern.test(result)) {
+              return defaultValue;
+            }
+            return result;
+          };
+          const migrate = option.migrate
+            ? (storedValue: unknown, storedVersion: number | undefined) => {
+                try {
+                  return normalize(option.migrate!(storedValue, storedVersion));
+                } catch {
+                  return defaultValue;
+                }
+              }
+            : undefined;
 
-      definitions.push({
-        category,
-        key: option.key,
-        type: valueType,
-        defaultValue,
-        version: option.version ?? 1,
-        normalize,
-        migrate,
-      });
+          definitions.push({
+            category,
+            key: option.key,
+            type: "string",
+            defaultValue,
+            version: option.version ?? 1,
+            normalize,
+            migrate,
+          });
+          break;
+        }
+        case "number": {
+          if (!isNumberOption(option)) {
+            throw new Error(`Invalid number setting configuration for ${category}.${option.key}`);
+          }
+          const defaultValue = option.default;
+          const min = typeof option.min === "number" ? option.min : undefined;
+          const max = typeof option.max === "number" ? option.max : undefined;
+          const step = typeof option.step === "number" && option.step > 0 ? option.step : undefined;
+
+          const normalize = (value: unknown): number => {
+            let num: number;
+            if (typeof value === "number" && Number.isFinite(value)) {
+              num = value;
+            } else if (typeof value === "string" && value.trim() !== "") {
+              num = Number(value);
+            } else {
+              num = defaultValue;
+            }
+            if (!Number.isFinite(num)) {
+              num = defaultValue;
+            }
+            if (min !== undefined && num < min) {
+              num = min;
+            }
+            if (max !== undefined && num > max) {
+              num = max;
+            }
+            if (step !== undefined && step > 0) {
+              const precision = Math.max(0, (step.toString().split(".")[1]?.length ?? 0));
+              num = Math.round(num / step) * step;
+              if (precision > 0) {
+                num = Number(num.toFixed(precision));
+              }
+            }
+            return num;
+          };
+
+          const migrate = option.migrate
+            ? (storedValue: unknown, storedVersion: number | undefined) => {
+                try {
+                  return normalize(option.migrate!(storedValue, storedVersion));
+                } catch {
+                  return defaultValue;
+                }
+              }
+            : undefined;
+
+          definitions.push({
+            category,
+            key: option.key,
+            type: "number",
+            defaultValue,
+            version: option.version ?? 1,
+            normalize,
+            migrate,
+          });
+          break;
+        }
+        case "enum": {
+          if (!isEnumOption(option)) {
+            throw new Error(`Invalid enum setting configuration for ${category}.${option.key}`);
+          }
+          const defaultValue = option.default;
+          const allowedValues = new Set(option.choices.map((choice) => choice.value));
+          if (!allowedValues.has(defaultValue)) {
+            throw new Error(
+              `Default value "${defaultValue}" not found in choices for ${category}.${option.key}`
+            );
+          }
+          const normalize = (value: unknown): string => {
+            if (typeof value === "string" && allowedValues.has(value)) {
+              return value;
+            }
+            if (value != null) {
+              const coerced = String(value);
+              if (allowedValues.has(coerced)) {
+                return coerced;
+              }
+            }
+            return defaultValue;
+          };
+          const migrate = option.migrate
+            ? (storedValue: unknown, storedVersion: number | undefined) => {
+                try {
+                  return normalize(option.migrate!(storedValue, storedVersion));
+                } catch {
+                  return defaultValue;
+                }
+              }
+            : undefined;
+
+          definitions.push({
+            category,
+            key: option.key,
+            type: "enum",
+            defaultValue,
+            version: option.version ?? 1,
+            normalize,
+            migrate,
+          });
+          break;
+        }
+        default:
+          throw new Error(
+            `Unsupported setting type "${String(optionType)}" for ${category}.${option.key}`
+          );
+      }
     });
   });
   return definitions;
@@ -411,15 +622,31 @@ export class Settings {
     this.current = SETTINGS_STORE.getSnapshotByCategory();
   }
 
-  static get(category: string, key: string): boolean {
-    return SETTINGS_STORE.get<boolean>(category, key);
+  static get<T extends SettingPrimitive = boolean>(category: string, key: string): T {
+    return SETTINGS_STORE.get<T>(category, key);
   }
 
-  static set(category: string, key: string, value: boolean): void {
+  static set<T extends SettingPrimitive>(category: string, key: string, value: T): void {
     SETTINGS_STORE.set(category, key, value);
     if (!this.current[category]) {
       this.current[category] = {};
     }
-    this.current[category][key] = SETTINGS_STORE.get<boolean>(category, key);
+    this.current[category][key] = SETTINGS_STORE.get<SettingPrimitive>(category, key);
   }
+}
+
+function isActionOption(option: SettingOption): option is SettingActionOption {
+  return (option as SettingActionOption).type === "action";
+}
+
+function isStringOption(option: SettingOption): option is SettingStringOption {
+  return (option as SettingStringOption).valueType === "string";
+}
+
+function isNumberOption(option: SettingOption): option is SettingNumberOption {
+  return (option as SettingNumberOption).valueType === "number";
+}
+
+function isEnumOption(option: SettingOption): option is SettingEnumOption {
+  return (option as SettingEnumOption).valueType === "enum";
 }

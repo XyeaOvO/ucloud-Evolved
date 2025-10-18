@@ -2,9 +2,14 @@ import { SVG_ICONS } from "../../constants";
 import { LOG } from "../../core/logger";
 import {
   SettingActionOption,
+  SettingEnumOption,
+  SettingNumberOption,
   SettingOption,
+  SettingPrimitive,
   SettingSection,
+  SettingStringOption,
   SettingToggleOption,
+  SettingValueType,
   SETTINGS_SECTIONS,
   Settings,
 } from "../../settings";
@@ -17,6 +22,15 @@ const HEADER_ID = "yzHelper-header";
 const MAIN_ID = "yzHelper-main";
 const CANCEL_ID = "cancelSettings";
 const SAVE_ID = "saveSettings";
+
+interface SettingInputBinding {
+  category: string;
+  key: string;
+  type: SettingValueType;
+  element: HTMLElement;
+  getValue(): SettingPrimitive;
+  setValue(value: unknown): void;
+}
 
 const PANEL_STYLES = `
 ${"#" + PANEL_ID} {
@@ -340,8 +354,8 @@ interface ActionBinding {
 interface SettingChange {
   category: string;
   key: string;
-  value: boolean;
-  previous: boolean;
+  value: SettingPrimitive;
+  previous: SettingPrimitive;
 }
 
 interface SettingsPanelOptions {
@@ -366,7 +380,7 @@ export class SettingsPanel {
   private contentElement: HTMLDivElement | null = null;
   private footerElement: HTMLDivElement | null = null;
 
-  private toggleInputs = new Map<string, HTMLInputElement>();
+  private inputBindings = new Map<string, SettingInputBinding>();
   private actionButtons = new Map<string, HTMLButtonElement>();
   private menuItems = new Map<string, HTMLElement>();
   private sectionElements = new Map<string, HTMLElement>();
@@ -397,13 +411,13 @@ export class SettingsPanel {
     }
     this.renderSidebar();
     this.renderSections();
-    this.populateToggleValues();
+    this.populateInputValues();
     this.updateActionStates();
   }
 
   refresh(): void {
     if (!this.initialized) return;
-    this.populateToggleValues();
+    this.populateInputValues();
     this.updateActionStates();
   }
 
@@ -529,7 +543,7 @@ export class SettingsPanel {
     if (!this.contentElement) return;
     this.contentElement.innerHTML = "";
     this.sectionElements.clear();
-    this.toggleInputs.clear();
+    this.inputBindings.clear();
     this.actionButtons.clear();
 
     SETTINGS_SECTIONS.forEach((section, index) => {
@@ -563,10 +577,22 @@ export class SettingsPanel {
     if (this.isActionOption(option)) {
       return this.renderActionOption(option);
     }
-    return this.renderToggleOption(section, option);
+    if (this.isStringOption(option)) {
+      return this.renderStringOption(section, option);
+    }
+    if (this.isNumberOption(option)) {
+      return this.renderNumberOption(section, option);
+    }
+    if (this.isEnumOption(option)) {
+      return this.renderEnumOption(section, option);
+    }
+    return this.renderBooleanOption(section, option as SettingToggleOption);
   }
 
-  private renderToggleOption(section: SettingSection, option: SettingToggleOption): HTMLElement | null {
+  private renderBooleanOption(
+    section: SettingSection,
+    option: SettingToggleOption
+  ): HTMLElement | null {
     const category = option.category ?? section.defaultCategory;
     const key = option.key;
     if (!category || !key) return null;
@@ -609,7 +635,192 @@ export class SettingsPanel {
       container.appendChild(description);
     }
 
-    this.toggleInputs.set(`${category}:${key}`, input);
+    const bindingKey = this.composeBindingKey(category, key);
+    this.inputBindings.set(bindingKey, {
+      category,
+      key,
+      type: "boolean",
+      element: input,
+      getValue: () => input.checked,
+      setValue: (value: unknown) => {
+        input.checked = Boolean(value);
+      },
+    });
+    return container;
+  }
+
+  private renderStringOption(
+    section: SettingSection,
+    option: SettingStringOption
+  ): HTMLElement | null {
+    const category = option.category ?? section.defaultCategory;
+    const key = option.key;
+    if (!category || !key) return null;
+
+    const container = document.createElement("div");
+    container.className = "setting-item";
+
+    const field = document.createElement("div");
+    field.className = "setting-toggle";
+
+    const label = document.createElement("span");
+    label.className = "setting-label";
+    label.dataset.descriptionId = `description-${category}_${key}`;
+    label.textContent = option.label;
+    field.appendChild(label);
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.id = `${category}_${key}`;
+    if (option.placeholder) input.placeholder = option.placeholder;
+    if (typeof option.maxLength === "number" && option.maxLength > 0) {
+      input.maxLength = Math.floor(option.maxLength);
+    }
+    field.appendChild(input);
+
+    container.appendChild(field);
+
+    if (option.description) {
+      const description = document.createElement("div");
+      description.className = "setting-description";
+      description.id = label.dataset.descriptionId;
+      description.textContent = option.description;
+      container.appendChild(description);
+    }
+
+    const bindingKey = this.composeBindingKey(category, key);
+    this.inputBindings.set(bindingKey, {
+      category,
+      key,
+      type: "string",
+      element: input,
+      getValue: () => input.value,
+      setValue: (value: unknown) => {
+        input.value = typeof value === "string" ? value : option.default;
+      },
+    });
+
+    return container;
+  }
+
+  private renderNumberOption(
+    section: SettingSection,
+    option: SettingNumberOption
+  ): HTMLElement | null {
+    const category = option.category ?? section.defaultCategory;
+    const key = option.key;
+    if (!category || !key) return null;
+
+    const container = document.createElement("div");
+    container.className = "setting-item";
+
+    const field = document.createElement("div");
+    field.className = "setting-toggle";
+
+    const label = document.createElement("span");
+    label.className = "setting-label";
+    label.dataset.descriptionId = `description-${category}_${key}`;
+    label.textContent = option.label;
+    field.appendChild(label);
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.id = `${category}_${key}`;
+    if (typeof option.min === "number") input.min = String(option.min);
+    if (typeof option.max === "number") input.max = String(option.max);
+    if (typeof option.step === "number") input.step = String(option.step);
+    field.appendChild(input);
+
+    container.appendChild(field);
+
+    if (option.description) {
+      const description = document.createElement("div");
+      description.className = "setting-description";
+      description.id = label.dataset.descriptionId;
+      description.textContent = option.description;
+      container.appendChild(description);
+    }
+
+    const bindingKey = this.composeBindingKey(category, key);
+    this.inputBindings.set(bindingKey, {
+      category,
+      key,
+      type: "number",
+      element: input,
+      getValue: () => {
+        const raw = input.value.trim();
+        if (raw === "") return option.default;
+        return Number(raw);
+      },
+      setValue: (value: unknown) => {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          input.value = String(value);
+        } else if (typeof value === "string" && value.trim() !== "") {
+          input.value = value;
+        } else {
+          input.value = String(option.default);
+        }
+      },
+    });
+
+    return container;
+  }
+
+  private renderEnumOption(
+    section: SettingSection,
+    option: SettingEnumOption
+  ): HTMLElement | null {
+    const category = option.category ?? section.defaultCategory;
+    const key = option.key;
+    if (!category || !key) return null;
+
+    const container = document.createElement("div");
+    container.className = "setting-item";
+
+    const field = document.createElement("div");
+    field.className = "setting-toggle";
+
+    const label = document.createElement("span");
+    label.className = "setting-label";
+    label.dataset.descriptionId = `description-${category}_${key}`;
+    label.textContent = option.label;
+    field.appendChild(label);
+
+    const select = document.createElement("select");
+    select.id = `${category}_${key}`;
+    option.choices.forEach((choice) => {
+      const choiceOption = document.createElement("option");
+      choiceOption.value = choice.value;
+      choiceOption.textContent = choice.label;
+      if (choice.description) choiceOption.title = choice.description;
+      select.appendChild(choiceOption);
+    });
+    field.appendChild(select);
+
+    container.appendChild(field);
+
+    if (option.description) {
+      const description = document.createElement("div");
+      description.className = "setting-description";
+      description.id = label.dataset.descriptionId;
+      description.textContent = option.description;
+      container.appendChild(description);
+    }
+
+    const allowedValues = new Set(option.choices.map((choice) => choice.value));
+    const bindingKey = this.composeBindingKey(category, key);
+    this.inputBindings.set(bindingKey, {
+      category,
+      key,
+      type: "enum",
+      element: select,
+      getValue: () => select.value,
+      setValue: (value: unknown) => {
+        const next = typeof value === "string" && allowedValues.has(value) ? value : option.default;
+        select.value = next;
+      },
+    });
+
     return container;
   }
 
@@ -708,15 +919,12 @@ export class SettingsPanel {
 
   private handleSave(): void {
     const changes: SettingChange[] = [];
-    this.toggleInputs.forEach((input) => {
-      const category = input.dataset.category;
-      const key = input.dataset.key;
-      if (!category || !key) return;
-      const previous = Settings.get(category, key);
-      const next = input.checked;
+    this.inputBindings.forEach((binding) => {
+      const previous = Settings.get<SettingPrimitive>(binding.category, binding.key);
+      const next = binding.getValue();
       if (previous !== next) {
-        Settings.set(category, key, next);
-        changes.push({ category, key, value: next, previous });
+        Settings.set(binding.category, binding.key, next);
+        changes.push({ category: binding.category, key: binding.key, value: next, previous });
       }
     });
 
@@ -742,7 +950,7 @@ export class SettingsPanel {
 
   private open(): void {
     if (!this.panelElement) return;
-    this.populateToggleValues();
+    this.populateInputValues();
     this.updateActionStates();
     this.panelElement.style.display = "flex";
     void this.panelElement.offsetWidth;
@@ -765,12 +973,10 @@ export class SettingsPanel {
     this.isVisible = false;
   }
 
-  private populateToggleValues(): void {
-    this.toggleInputs.forEach((input) => {
-      const category = input.dataset.category;
-      const key = input.dataset.key;
-      if (!category || !key) return;
-      input.checked = Settings.get(category, key);
+  private populateInputValues(): void {
+    this.inputBindings.forEach((binding) => {
+      const value = Settings.get<SettingPrimitive>(binding.category, binding.key);
+      binding.setValue(value);
     });
   }
 
@@ -825,6 +1031,10 @@ export class SettingsPanel {
       .forEach((desc) => desc.classList.remove("visible"));
   }
 
+  private composeBindingKey(category: string, key: string): string {
+    return `${category}:${key}`;
+  }
+
   private resolveSectionIcon(section: SettingSection): string {
     const iconKey = section.iconKey ?? section.id;
     const iconMap: Record<string, string> = {
@@ -842,5 +1052,16 @@ export class SettingsPanel {
   private isActionOption(option: SettingOption): option is SettingActionOption {
     return (option as SettingActionOption).type === "action";
   }
-}
 
+  private isStringOption(option: SettingOption): option is SettingStringOption {
+    return (option as SettingStringOption).valueType === "string";
+  }
+
+  private isNumberOption(option: SettingOption): option is SettingNumberOption {
+    return (option as SettingNumberOption).valueType === "number";
+  }
+
+  private isEnumOption(option: SettingOption): option is SettingEnumOption {
+    return (option as SettingEnumOption).valueType === "enum";
+  }
+}
