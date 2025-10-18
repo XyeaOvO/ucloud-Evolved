@@ -126,7 +126,7 @@ ${"#" + CONTENT_ID} {
   padding: 20px;
   overflow-y: auto;
   position: relative;
-  padding-bottom: 70px;
+  padding-bottom: 24px;
   background: #fff;
 }
 
