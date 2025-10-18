@@ -10,6 +10,7 @@ import { HomeworkModule } from "./homework/module";
 import { SettingsPanel } from "./settings/panel";
 import { isCourseRoute, isNotificationRoute } from "./routing";
 import { handleCoursesPage as handleCoursesPageFlow } from "./pages/course-list";
+import { handleNotificationPage as handleNotificationPageFlow } from "./pages/notification";
 import { API, AssignmentSummary, UndoneListResponse } from "../core/api";
 import { Storage, StoredCourseInfo } from "../core/storage";
 
@@ -2356,102 +2357,21 @@ export class UCloudEnhancer {
   }
 
   handleNotificationPage(forceRefresh = false) {
-    if (forceRefresh && this._notificationObserver) {
-      try {
-        this._notificationObserver.disconnect();
-      } catch (error) {
-        LOG.debug('重置通知观察器失败:', error);
-      }
-      this.observers.delete(this._notificationObserver);
-      this._notificationObserver = null;
-    }
-
-    Utils.wait(
-      () => document.querySelector(CONSTANTS.SELECTORS.notificationList),
+    handleNotificationPageFlow(
       {
-        timeout: 7000,
-        observerOptions: { childList: true, subtree: true },
-        label: 'notification-list',
-        logTimeout: false,
-      }
-    )
-      .then((list) => {
-        if (!(list instanceof HTMLElement)) return;
-        this.applyNotificationListEnhancements(list);
-
-        if (this._notificationObserver) return;
-        const observer = new MutationObserver(() => {
-          observer.disconnect();
-          this.applyNotificationListEnhancements(list);
-          observer.observe(list, { childList: true, subtree: true });
-        });
-        observer.observe(list, { childList: true, subtree: true });
-        this._notificationObserver = observer;
-        this.observers.add(observer);
-      })
-      .catch((error) => {
-        LOG.debug('处理通知页面失败:', error);
-      });
-  }
-
-  private applyNotificationListEnhancements(list: HTMLElement): void {
-    if (!list) return;
-    const items = Array.from(list.children).filter(
-      (child): child is HTMLElement => child instanceof HTMLElement
+        getNotificationObserver: () => this._notificationObserver,
+        setNotificationObserver: (observer) => {
+          this._notificationObserver = observer;
+        },
+        registerObserver: (observer) => {
+          this.observers.add(observer);
+        },
+        unregisterObserver: (observer) => {
+          this.observers.delete(observer);
+        },
+      },
+      forceRefresh
     );
-    if (!items.length) return;
-
-    const sortOrder = Settings.get('notification', 'sortOrder') || 'desc';
-    const highlightEnabled = Settings.get('notification', 'betterNotificationHighlight');
-    const sorted = items.map((item, index) => {
-      const timestamp = this.extractNotificationTimestamp(item);
-      return {
-        item,
-        index,
-        timestamp: timestamp ?? (sortOrder === 'asc' ? index : -index),
-      };
-    });
-
-    sorted.sort((a, b) => {
-      if (a.timestamp === b.timestamp) {
-        return sortOrder === 'asc' ? a.index - b.index : b.index - a.index;
-      }
-      return sortOrder === 'asc' ? a.timestamp - b.timestamp : b.timestamp - a.timestamp;
-    });
-
-    sorted.forEach(({ item }) => list.appendChild(item));
-
-    items.forEach((item) => {
-      const dot = item.querySelector(CONSTANTS.SELECTORS.notificationDot);
-      if (highlightEnabled) {
-        item.classList.toggle('notification-with-dot', Boolean(dot));
-      } else {
-        item.classList.remove('notification-with-dot');
-      }
-    });
-  }
-
-  private extractNotificationTimestamp(element: HTMLElement): number | null {
-    try {
-      const timestampNode = element.querySelector(CONSTANTS.SELECTORS.notificationTimestamp);
-      if (timestampNode && timestampNode.textContent) {
-        const parsed = Utils.parseDateFlexible(timestampNode.textContent.trim());
-        if (parsed) return parsed.getTime();
-      }
-      const dataTime =
-        element.getAttribute('data-time') ||
-        element.getAttribute('data-time-ms') ||
-        element.getAttribute('data-timestamp');
-      if (dataTime) {
-        const numeric = Number(dataTime);
-        if (Number.isFinite(numeric)) {
-          return numeric > 1e11 ? numeric : numeric * 1000;
-        }
-      }
-    } catch (error) {
-      LOG.debug('解析通知时间失败:', error);
-    }
-    return null;
   }
 }
 
