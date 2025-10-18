@@ -2,6 +2,8 @@ import { SVG_ICONS } from "../../constants";
 import { LOG } from "../../core/logger";
 import {
   SettingActionOption,
+  SettingCategory,
+  SettingChange,
   SettingEnumOption,
   SettingNumberOption,
   SettingOption,
@@ -24,12 +26,15 @@ const CANCEL_ID = "cancelSettings";
 const SAVE_ID = "saveSettings";
 
 interface SettingInputBinding {
-  category: string;
+  category: SettingCategory;
   key: string;
   type: SettingValueType;
-  element: HTMLElement;
+  element: HTMLInputElement | HTMLSelectElement;
   getValue(): SettingPrimitive;
   setValue(value: unknown): void;
+  validate?: (value: SettingPrimitive) => string | null;
+  normalize?: (value: SettingPrimitive) => SettingPrimitive;
+  errorElement?: HTMLElement | null;
 }
 
 const PANEL_STYLES = `
@@ -272,6 +277,19 @@ ${"#" + PANEL_ID} select {
   padding-right: 28px;
 }
 
+${"#" + PANEL_ID} .setting-input-error {
+  margin-left: 54px;
+  margin-top: 4px;
+  color: #f56c6c;
+  font-size: 12px;
+  min-height: 16px;
+}
+
+${"#" + PANEL_ID} .setting-input-invalid {
+  border-color: #f56c6c !important;
+  box-shadow: 0 0 0 2px rgba(245, 108, 108, 0.15) !important;
+}
+
 ${"#" + PANEL_ID} .buttons {
   display: flex;
   justify-content: flex-end;
@@ -384,13 +402,6 @@ interface ActionBinding {
   onClick: () => void | Promise<void>;
   getState?: () => ActionButtonState | null | undefined;
   className?: string;
-}
-
-interface SettingChange {
-  category: string;
-  key: string;
-  value: SettingPrimitive;
-  previous: SettingPrimitive;
 }
 
 interface SettingsPanelOptions {
@@ -628,7 +639,7 @@ export class SettingsPanel {
     section: SettingSection,
     option: SettingToggleOption
   ): HTMLElement | null {
-    const category = option.category ?? section.defaultCategory;
+    const category = this.resolveOptionCategory(section, option);
     const key = option.key;
     if (!category || !key) return null;
 
@@ -671,7 +682,7 @@ export class SettingsPanel {
     }
 
     const bindingKey = this.composeBindingKey(category, key);
-    this.inputBindings.set(bindingKey, {
+    const binding: SettingInputBinding = {
       category,
       key,
       type: "boolean",
@@ -679,8 +690,12 @@ export class SettingsPanel {
       getValue: () => input.checked,
       setValue: (value: unknown) => {
         input.checked = Boolean(value);
+        this.setBindingError(binding, null);
       },
-    });
+    };
+    this.inputBindings.set(bindingKey, binding);
+    this.setBindingError(binding, null);
+    input.addEventListener("change", () => this.setBindingError(binding, null));
     return container;
   }
 
@@ -688,7 +703,7 @@ export class SettingsPanel {
     section: SettingSection,
     option: SettingStringOption
   ): HTMLElement | null {
-    const category = option.category ?? section.defaultCategory;
+    const category = this.resolveOptionCategory(section, option);
     const key = option.key;
     if (!category || !key) return null;
 
@@ -723,17 +738,38 @@ export class SettingsPanel {
       container.appendChild(description);
     }
 
+    const error = document.createElement("div");
+    error.className = "setting-input-error";
+    container.appendChild(error);
+
     const bindingKey = this.composeBindingKey(category, key);
-    this.inputBindings.set(bindingKey, {
+    const binding: SettingInputBinding = {
       category,
       key,
       type: "string",
       element: input,
+      errorElement: error,
       getValue: () => input.value,
       setValue: (value: unknown) => {
         input.value = typeof value === "string" ? value : option.default;
+        this.validateBinding(binding);
       },
-    });
+      validate: (value: SettingPrimitive) => {
+        const text = typeof value === "string" ? value.trim() : "";
+        if (!text.length) {
+          return "内容不能为空";
+        }
+        if (!/{{\s*(course|date|timestamp)\s*}}/i.test(text)) {
+          return "模板需包含 {{course}} 或 {{date}} 占位符";
+        }
+        return null;
+      },
+      normalize: (value: SettingPrimitive) =>
+        typeof value === "string" ? value.trim() : value,
+    };
+    this.inputBindings.set(bindingKey, binding);
+    this.validateBinding(binding);
+    input.addEventListener("input", () => this.validateBinding(binding));
 
     return container;
   }
@@ -742,7 +778,7 @@ export class SettingsPanel {
     section: SettingSection,
     option: SettingNumberOption
   ): HTMLElement | null {
-    const category = option.category ?? section.defaultCategory;
+    const category = this.resolveOptionCategory(section, option);
     const key = option.key;
     if (!category || !key) return null;
 
@@ -776,12 +812,17 @@ export class SettingsPanel {
       container.appendChild(description);
     }
 
+    const error = document.createElement("div");
+    error.className = "setting-input-error";
+    container.appendChild(error);
+
     const bindingKey = this.composeBindingKey(category, key);
-    this.inputBindings.set(bindingKey, {
+    const binding: SettingInputBinding = {
       category,
       key,
       type: "number",
       element: input,
+      errorElement: error,
       getValue: () => {
         const raw = input.value.trim();
         if (raw === "") return option.default;
@@ -795,8 +836,26 @@ export class SettingsPanel {
         } else {
           input.value = String(option.default);
         }
+        this.validateBinding(binding);
       },
-    });
+      validate: (value: SettingPrimitive) => {
+        if (typeof value !== "number" || !Number.isFinite(value)) {
+          return "请输入有效的数字";
+        }
+        if (typeof option.min === "number" && value < option.min) {
+          return `数值需不小于 ${option.min}`;
+        }
+        if (typeof option.max === "number" && value > option.max) {
+          return `数值需不大于 ${option.max}`;
+        }
+        return null;
+      },
+      normalize: (value: SettingPrimitive) =>
+        typeof value === "number" && Number.isFinite(value) ? value : Number(value),
+    };
+    this.inputBindings.set(bindingKey, binding);
+    this.validateBinding(binding);
+    input.addEventListener("input", () => this.validateBinding(binding));
 
     return container;
   }
@@ -805,7 +864,7 @@ export class SettingsPanel {
     section: SettingSection,
     option: SettingEnumOption
   ): HTMLElement | null {
-    const category = option.category ?? section.defaultCategory;
+    const category = this.resolveOptionCategory(section, option);
     const key = option.key;
     if (!category || !key) return null;
 
@@ -842,19 +901,36 @@ export class SettingsPanel {
       container.appendChild(description);
     }
 
+    const error = document.createElement("div");
+    error.className = "setting-input-error";
+    container.appendChild(error);
+
     const allowedValues = new Set(option.choices.map((choice) => choice.value));
     const bindingKey = this.composeBindingKey(category, key);
-    this.inputBindings.set(bindingKey, {
+    const binding: SettingInputBinding = {
       category,
       key,
       type: "enum",
       element: select,
+      errorElement: error,
       getValue: () => select.value,
       setValue: (value: unknown) => {
         const next = typeof value === "string" && allowedValues.has(value) ? value : option.default;
         select.value = next;
+        this.validateBinding(binding);
       },
-    });
+      validate: (value: SettingPrimitive) => {
+        if (typeof value !== "string" || !allowedValues.has(value)) {
+          return "请选择有效的选项";
+        }
+        return null;
+      },
+      normalize: (value: SettingPrimitive) =>
+        typeof value === "string" && allowedValues.has(value) ? value : option.default,
+    };
+    this.inputBindings.set(bindingKey, binding);
+    this.validateBinding(binding);
+    select.addEventListener("change", () => this.validateBinding(binding));
 
     return container;
   }
@@ -954,14 +1030,39 @@ export class SettingsPanel {
 
   private handleSave(): void {
     const changes: SettingChange[] = [];
+    let hasError = false;
+
     this.inputBindings.forEach((binding) => {
-      const previous = Settings.get<SettingPrimitive>(binding.category, binding.key);
-      const next = binding.getValue();
-      if (previous !== next) {
-        Settings.set(binding.category, binding.key, next);
-        changes.push({ category: binding.category, key: binding.key, value: next, previous });
+      const rawValue = binding.getValue();
+      const error = binding.validate ? binding.validate(rawValue) : null;
+      if (error) {
+        this.setBindingError(binding, error);
+        hasError = true;
+        return;
       }
+      this.setBindingError(binding, null);
+
+      const normalizedValue =
+        typeof binding.normalize === "function" ? binding.normalize(rawValue) : rawValue;
+      const previous = Settings.get<SettingPrimitive>(binding.category, binding.key);
+      if (previous === normalizedValue) {
+        return;
+      }
+      Settings.set(binding.category, binding.key, normalizedValue);
+      const applied = Settings.get<SettingPrimitive>(binding.category, binding.key);
+      binding.setValue(applied);
+      changes.push({
+        category: binding.category,
+        key: binding.key,
+        previous,
+        value: applied,
+      });
     });
+
+    if (hasError) {
+      window.alert("请修正设置中的错误后再保存。");
+      return;
+    }
 
     this.close();
     this.options.onSave?.(changes);
@@ -1012,6 +1113,7 @@ export class SettingsPanel {
     this.inputBindings.forEach((binding) => {
       const value = Settings.get<SettingPrimitive>(binding.category, binding.key);
       binding.setValue(value);
+      this.validateBinding(binding);
     });
   }
 
@@ -1066,8 +1168,33 @@ export class SettingsPanel {
       .forEach((desc) => desc.classList.remove("visible"));
   }
 
+  private resolveOptionCategory(
+    section: SettingSection,
+    option: { category?: SettingCategory }
+  ): SettingCategory {
+    return option.category ?? section.defaultCategory;
+  }
+
   private composeBindingKey(category: string, key: string): string {
     return `${category}:${key}`;
+  }
+
+  private validateBinding(binding: SettingInputBinding): string | null {
+    const value = binding.getValue();
+    const error = binding.validate ? binding.validate(value) : null;
+    this.setBindingError(binding, error);
+    return error;
+  }
+
+  private setBindingError(binding: SettingInputBinding, message: string | null): void {
+    if (binding.errorElement) {
+      binding.errorElement.textContent = message || "";
+    }
+    if (message) {
+      binding.element.classList.add("setting-input-invalid");
+    } else {
+      binding.element.classList.remove("setting-input-invalid");
+    }
   }
 
   private resolveSectionIcon(section: SettingSection): string {
