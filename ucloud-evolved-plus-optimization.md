@@ -27,6 +27,9 @@
 - `createUnifiedHomeworkView`、`showTrashBin`、`createUI` 等方法手写大量 HTML 字符串或直接操作 DOM API，缺乏模板/组件抽象，复用与重构成本高。
 - 样式仍由 `GM_addStyle` 在各方法中多次注入，缺少命名约定及冲突检测；主题、弹窗、trash modal 等样式难以复用或按需加载。
 - 页面观察者、事件监听仍由 `UCloudEnhancer` 手动维护，部分流程（如通知页面、高频 MutationObserver）缺少统一注册/销毁机制。
+- 设置面板 UI 仍通过一次性 `innerHTML` 模板和逐项 `querySelector` 绑定（见 `src/app/ucloud-enhancer.ts` 约 2400 行），新增的回收站清理按钮等动作需要手工接线，无法依据 `SETTINGS_SECTIONS` 自动渲染/收敛逻辑，扩展成本高。
+- `HomeworkModule`/`HomeworkPanelView` 虽已拆分核心渲染，但确认弹窗、trash modal 等仍以内联模板字符串和多段 `GM_addStyle` 注入组合，缺乏可复用的样式/组件层，导致 CSS/HTML 体积持续膨胀且难以测试。
+- ✅ 最新进展：`HomeworkModule` 现已将统一作业面板的 DOM 渲染与事件绑定全部委托给独立的 `HomeworkPanelView` 组件类，去除了手写监听/查询和临时定时器，实现回收站计数、搜索过滤等逻辑的集中管理，为后续模板化奠定基础。
 
 ### 3.4 性能与资源消耗
 - 统一作业视图与课程抽取在哈希路由切换时重复拉取数据，缺少对已有缓存快照的增量复用与预加载控制；`API.searchCourses` 仍可能对每个作业逐个请求任务列表。
@@ -37,6 +40,7 @@
 - `DownloadManager` 已具备队列和 GM/fetch 双通路，但并发控制、任务状态变更、错误重试等能力未完全抽象给调用方，新接口仍需在 `UCloudEnhancer` 内部手动维护 `isBatchDownloading` 等标志。
 - 批量打包逻辑直接在 `UCloudEnhancer` 实现，缺少队列化模型、进度广播与取消反馈的清晰边界，难以在其他场景复用。
 - 预览 URL 获取仍穿插于页面逻辑中，没有统一的资源模型（文件类型、鉴权信息、回退策略），导致重复的容错分支。
+- ✅ 新增 `handleCourseHome` 逻辑，对课程主页资源列表重新注入打包下载按钮并利用 `API.getSiteResources` 数据源；siteId 解析默认使用课程缓存，缺失时回退读取 URL 参数，并修复调试菜单开关（通过 `setDebugFlag`）以恢复批量打包、全部下载、预览自动下载等功能。
 
 ### 3.6 稳定性与观测
 - `LOG` 模块仅区分 debug/info/warn/error，未建立错误等级、场景标签、埋点上报；无法得知下载/预览/作业渲染成功率。
@@ -74,8 +78,9 @@
 - [ ][R7] 引入模板/组件层（lit-html、hyperscript 或编译期 JSX），替换手写 `innerHTML` 与重复 DOM 查询。
 - [ ][R8] 建立样式模块和命名约定，构建期合并并避免重复注入；将主题变量、通用组件样式抽离。
 - [ ][R9] 实现统一的 Observer/事件注册管理器，自动处理路由切换与销毁。
-- [ ][R28] 为统一作业视图、trash modal、设置面板封装 UI 组件与状态机，避免在运行时拼接 HTML 字符串。
+- [~][R28] 为统一作业视图、trash modal、设置面板封装 UI 组件与状态机（已抽离 `HomeworkPanelView` 管理统一作业视图的渲染、交互与回收站同步，下一步需要引入模板化 DOM 与其它面板的组件化）。
 - [ ][R29] 提供首屏渐进渲染策略（如骨架屏组件化、分页/虚拟滚动支持）。
+- [ ][R34] 将设置面板改造成数据驱动的组件：根据 `SETTINGS_SECTIONS` 自动渲染分组/动作，集中事件绑定与状态同步，支持后续新增字段与输入类型。
 
 ### 4.4 下载与资源处理
 - [~][R10] 重构下载任务模型，支持队列、并发限制、可取消、进度通知及错误重试（已实现基础队列和并发控制，但任务生命周期仍分散在调用方）。
