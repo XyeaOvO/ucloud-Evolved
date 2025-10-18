@@ -294,14 +294,16 @@ ${"#" + PANEL_ID} .buttons {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  position: absolute;
+  position: sticky;
   bottom: 0;
+  left: 0;
   right: 0;
   background: #fff;
   padding: 10px 20px;
-  width: calc(100% - 40px);
+  width: 100%;
   border-top: 1px solid #ebeef5;
   box-sizing: border-box;
+  margin-top: 16px;
 }
 
 ${"#" + PANEL_ID} button {
