@@ -302,11 +302,39 @@ export const SETTINGS_SECTIONS: SettingSection[] = [
         label: "显示插件悬浮窗",
         description: "在网页界面显示助手配置按钮，方便随时调整设置。",
       },
+      {
+        type: "action",
+        buttonId: "settings-export",
+        buttonText: "导出配置",
+        buttonClass: "action-btn secondary",
+        description: "复制当前配置为 JSON，便于备份或分享。",
+      },
+      {
+        type: "action",
+        buttonId: "settings-import",
+        buttonText: "导入配置",
+        buttonClass: "action-btn",
+        description: "从 JSON 内容导入配置，导入前请确保内容可信。",
+      },
+      {
+        type: "action",
+        buttonId: "settings-reset",
+        buttonText: "恢复默认设置",
+        buttonClass: "action-btn",
+        description: "将所有配置恢复为默认值，请谨慎操作。",
+      },
     ],
   },
 ];
 
 export type SettingPrimitive = boolean | string | number;
+
+export interface SettingChange {
+  category: SettingCategory;
+  key: string;
+  previous: SettingPrimitive;
+  value: SettingPrimitive;
+}
 
 type SettingState = Record<string, Record<string, SettingPrimitive>>;
 
@@ -392,6 +420,63 @@ class SettingsStore {
     });
     return snapshot;
   }
+
+  exportAll(): SettingState {
+    return this.getSnapshotByCategory();
+  }
+
+  importAll(payload: unknown): SettingChange[] {
+    if (!payload || typeof payload !== "object") {
+      return [];
+    }
+    const record = payload as Record<string, unknown>;
+    const changes: SettingChange[] = [];
+    this.definitions.forEach((definition, mapKey) => {
+      const categoryPayload = record[definition.category];
+      if (!categoryPayload || typeof categoryPayload !== "object") return;
+      const incoming = (categoryPayload as Record<string, unknown>)[definition.key];
+      if (incoming === undefined) return;
+      const normalized = definition.normalize(incoming);
+      const previous = this.get<SettingPrimitive>(definition.category, definition.key);
+      if (previous === normalized) {
+        return;
+      }
+      this.values.set(mapKey, normalized);
+      GM_setValue(this.storageKey(definition), {
+        value: normalized,
+        version: definition.version,
+      });
+      changes.push({
+        category: definition.category,
+        key: definition.key,
+        previous,
+        value: normalized,
+      });
+    });
+    return changes;
+  }
+
+  resetAll(): SettingChange[] {
+    const changes: SettingChange[] = [];
+    this.definitions.forEach((definition, mapKey) => {
+      const previous = this.get<SettingPrimitive>(definition.category, definition.key);
+      const next = definition.defaultValue as SettingPrimitive;
+      if (previous === next) return;
+      this.values.set(mapKey, next);
+      GM_setValue(this.storageKey(definition), {
+        value: next,
+        version: definition.version,
+      });
+      changes.push({
+        category: definition.category,
+        key: definition.key,
+        previous,
+        value: next,
+      });
+    });
+    return changes;
+  }
+
 
   private composeKey(category: string, key: string): string {
     return `${category}:${key}`;
@@ -653,6 +738,26 @@ export class Settings {
   static init(): void {
     SETTINGS_STORE.initialize();
     this.current = SETTINGS_STORE.getSnapshotByCategory();
+  }
+
+  static exportAll(): SettingState {
+    return SETTINGS_STORE.exportAll();
+  }
+
+  static importAll(payload: unknown): SettingChange[] {
+    const changes = SETTINGS_STORE.importAll(payload);
+    if (changes.length) {
+      this.current = SETTINGS_STORE.getSnapshotByCategory();
+    }
+    return changes;
+  }
+
+  static resetAll(): SettingChange[] {
+    const changes = SETTINGS_STORE.resetAll();
+    if (changes.length) {
+      this.current = SETTINGS_STORE.getSnapshotByCategory();
+    }
+    return changes;
   }
 
   static get<T extends SettingPrimitive = boolean>(category: string, key: string): T {
