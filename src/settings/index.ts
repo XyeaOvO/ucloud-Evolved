@@ -14,12 +14,17 @@ export interface SettingActionOption {
   description?: string;
 }
 
+export type SettingValueType = "boolean" | "string" | "number";
+
 export interface SettingToggleOption {
   key: string;
   default: boolean;
   label: string;
   description: string;
   category?: SettingCategory;
+  valueType?: SettingValueType;
+  version?: number;
+  migrate?: (storedValue: unknown, storedVersion: number | undefined) => boolean;
   type?: undefined;
 }
 
@@ -231,44 +236,190 @@ export const SETTINGS_SECTIONS: SettingSection[] = [
 
 type SettingState = Record<string, Record<string, boolean>>;
 
-export class Settings {
-  static defaults: SettingState = Settings.buildDefaults();
-  static current: SettingState = {};
+type SettingDefinitionAny = SettingDefinition<boolean | string | number>;
 
-  private static buildDefaults(): SettingState {
+interface SettingDefinition<T> {
+  category: SettingCategory;
+  key: string;
+  type: SettingValueType;
+  defaultValue: T;
+  version: number;
+  normalize: (value: unknown) => T;
+  migrate?: (storedValue: unknown, storedVersion: number | undefined) => T;
+}
+
+class SettingsStore {
+  private readonly definitions = new Map<string, SettingDefinitionAny>();
+  private readonly values = new Map<string, unknown>();
+  readonly defaultsByCategory: SettingState;
+
+  constructor(definitions: SettingDefinitionAny[]) {
     const defaults: SettingState = {};
-    SETTINGS_SECTIONS.forEach((section) => {
-      const defaultCategory = section.defaultCategory;
-      section.options.forEach((option) => {
-        if ("type" in option && option.type === "action") return;
-        const category = option.category ?? defaultCategory;
-        if (!defaults[category]) defaults[category] = {};
-        defaults[category][option.key] = option.default ?? false;
-      });
+    definitions.forEach((definition) => {
+      const mapKey = this.composeKey(definition.category, definition.key);
+      if (this.definitions.has(mapKey)) {
+        throw new Error(`Duplicate setting definition: ${definition.category}.${definition.key}`);
+      }
+      this.definitions.set(mapKey, definition);
+      if (!defaults[definition.category]) {
+        defaults[definition.category] = {};
+      }
+      // Currently all settings are boolean, ensure typing aligns with consumers.
+      defaults[definition.category][definition.key] = Boolean(definition.defaultValue);
     });
-    return defaults;
+    Object.keys(defaults).forEach((category) => {
+      Object.freeze(defaults[category]);
+    });
+    this.defaultsByCategory = Object.freeze(defaults);
   }
 
-  static init(): void {
-    this.current = {};
-    Object.entries(this.defaults).forEach(([category, entries]) => {
-      this.current[category] = {};
-      Object.entries(entries).forEach(([key, fallback]) => {
-        this.current[category][key] = GM_getValue(`${category}_${key}`, fallback);
+  initialize(): void {
+    this.values.clear();
+    this.definitions.forEach((definition, mapKey) => {
+      const raw = GM_getValue(this.storageKey(definition), undefined);
+      const parsed = this.deserialize(definition, raw);
+      this.values.set(mapKey, parsed);
+    });
+  }
+
+  get<T>(category: string, key: string): T {
+    const mapKey = this.composeKey(category, key);
+    const definition = this.definitions.get(mapKey);
+    if (!definition) {
+      throw new Error(`Unknown setting: ${category}.${key}`);
+    }
+    if (this.values.has(mapKey)) {
+      return this.values.get(mapKey) as T;
+    }
+    return definition.defaultValue as unknown as T;
+  }
+
+  set<T>(category: string, key: string, value: T): void {
+    const mapKey = this.composeKey(category, key);
+    const definition = this.definitions.get(mapKey);
+    if (!definition) {
+      throw new Error(`Unknown setting: ${category}.${key}`);
+    }
+    const normalized = definition.normalize(value);
+    this.values.set(mapKey, normalized);
+    GM_setValue(this.storageKey(definition), {
+      value: normalized,
+      version: definition.version,
+    });
+  }
+
+  getSnapshotByCategory(): SettingState {
+    const snapshot: SettingState = {};
+    this.definitions.forEach((definition) => {
+      if (!snapshot[definition.category]) {
+        snapshot[definition.category] = {};
+      }
+      snapshot[definition.category][definition.key] = this.get<boolean>(definition.category, definition.key);
+    });
+    return snapshot;
+  }
+
+  private composeKey(category: string, key: string): string {
+    return `${category}:${key}`;
+  }
+
+  private storageKey(definition: SettingDefinitionAny): string {
+    return `${definition.category}_${definition.key}`;
+  }
+
+  private deserialize<T>(definition: SettingDefinition<T>, rawValue: unknown): T {
+    if (rawValue == null) {
+      return definition.defaultValue;
+    }
+
+    let storedValue = rawValue;
+    let storedVersion: number | undefined;
+    if (typeof rawValue === "object" && rawValue !== null && "value" in (rawValue as Record<string, unknown>)) {
+      const record = rawValue as Record<string, unknown>;
+      storedValue = record.value;
+      storedVersion = typeof record.version === "number" ? record.version : undefined;
+    }
+
+    let normalized = definition.normalize(storedValue);
+    if (definition.migrate && storedVersion !== undefined && storedVersion < definition.version) {
+      try {
+        normalized = definition.migrate(storedValue, storedVersion);
+      } catch {
+        normalized = definition.defaultValue;
+      }
+    }
+    return normalized;
+  }
+}
+
+function collectSettingDefinitions(): SettingDefinitionAny[] {
+  const definitions: SettingDefinitionAny[] = [];
+  SETTINGS_SECTIONS.forEach((section) => {
+    const defaultCategory = section.defaultCategory;
+    section.options.forEach((option) => {
+      if ("type" in option && option.type === "action") return;
+      const category = option.category ?? defaultCategory;
+      const valueType = option.valueType ?? "boolean";
+      if (valueType !== "boolean") {
+        throw new Error(`Unsupported setting type "${valueType}" for ${category}.${option.key}`);
+      }
+      const defaultValue = option.default ?? false;
+      const normalize = (value: unknown): boolean => {
+        if (typeof value === "boolean") return value;
+        if (typeof value === "string") {
+          const normalized = value.trim().toLowerCase();
+          if (normalized === "true" || normalized === "1") return true;
+          if (normalized === "false" || normalized === "0") return false;
+        }
+        if (typeof value === "number") return value !== 0;
+        return defaultValue;
+      };
+
+      const migrate = option.migrate
+        ? (storedValue: unknown, storedVersion: number | undefined) => {
+            try {
+              return option.migrate!(storedValue, storedVersion);
+            } catch {
+              return defaultValue;
+            }
+          }
+        : undefined;
+
+      definitions.push({
+        category,
+        key: option.key,
+        type: valueType,
+        defaultValue,
+        version: option.version ?? 1,
+        normalize,
+        migrate,
       });
     });
+  });
+  return definitions;
+}
+
+const SETTINGS_DEFINITIONS = collectSettingDefinitions();
+const SETTINGS_STORE = new SettingsStore(SETTINGS_DEFINITIONS);
+
+export class Settings {
+  static readonly defaults: SettingState = SETTINGS_STORE.defaultsByCategory;
+  static current: SettingState = {};
+
+  static init(): void {
+    SETTINGS_STORE.initialize();
+    this.current = SETTINGS_STORE.getSnapshotByCategory();
   }
 
   static get(category: string, key: string): boolean {
-    const current = this.current[category]?.[key];
-    if (typeof current === "boolean") return current;
-    const fallback = this.defaults[category]?.[key];
-    return typeof fallback === "boolean" ? fallback : false;
+    return SETTINGS_STORE.get<boolean>(category, key);
   }
 
   static set(category: string, key: string, value: boolean): void {
-    if (!this.current[category]) this.current[category] = {};
-    this.current[category][key] = value;
-    GM_setValue(`${category}_${key}`, value);
+    SETTINGS_STORE.set(category, key, value);
+    if (!this.current[category]) {
+      this.current[category] = {};
+    }
+    this.current[category][key] = SETTINGS_STORE.get<boolean>(category, key);
   }
 }
