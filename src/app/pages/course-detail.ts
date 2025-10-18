@@ -2,12 +2,16 @@ import { API } from "../../core/api";
 import { LOG } from "../../core/logger";
 import { Settings } from "../../settings";
 import { Utils } from "../../utils";
+import {
+  CourseResourceContext,
+  setupCourseResources,
+} from "./course-resources";
 
 export interface CourseDetailContext {
   getCourseHomeParams(): URLSearchParams;
   resolveStoredSiteId(): string;
   logDownloadResources(resources: unknown[]): void;
-  setupCourseResources(resources: any[]): Promise<void>;
+  getCourseResourceContext(): CourseResourceContext;
 }
 
 export async function handleCourseHome(context: CourseDetailContext): Promise<void> {
@@ -65,7 +69,7 @@ export async function handleCourseHome(context: CourseDetailContext): Promise<vo
       return;
     }
     context.logDownloadResources(resources);
-    await context.setupCourseResources(resources);
+    await setupCourseResources(context.getCourseResourceContext(), resources);
   } catch (error) {
     LOG.error("处理课程主页资源失败:", error);
   }
