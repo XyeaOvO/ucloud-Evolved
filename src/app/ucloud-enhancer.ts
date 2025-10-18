@@ -7,6 +7,7 @@ import { DownloadManager } from "../services/download-manager";
 import { CourseExtractor } from "../services/course-extractor";
 import { NotificationManager } from "../services/notification-manager";
 import { HomeworkModule } from "./homework/module";
+import { SettingsPanel } from "./settings/panel";
 import { isCourseRoute, isNotificationRoute } from "./routing";
 import { API, AssignmentSummary, UndoneListResponse } from "../core/api";
 import { Storage, StoredCourseInfo } from "../core/storage";
@@ -16,12 +17,9 @@ export class UCloudEnhancer {
   private courseExtractor: CourseExtractor;
   private currentPage: string;
   private homework: HomeworkModule;
+  private settingsPanel: SettingsPanel;
   private observers: Set<{ disconnect?: () => void }>;
   private isBatchDownloading: boolean;
-  private _settingsStylesInjected: boolean;
-  private _settingsToggle: HTMLElement | null;
-  private _settingsPanel: HTMLElement | null;
-  private _settingsInitialized: boolean;
   private _injectedStyles: Set<string>;
   private _themeActive: boolean;
   private _unlockCopyBound: boolean;
@@ -35,13 +33,21 @@ export class UCloudEnhancer {
   this.downloadManager = new DownloadManager();
   this.courseExtractor = new CourseExtractor(); // 新增课程提取器
   this.homework = new HomeworkModule();
+  this.settingsPanel = new SettingsPanel({
+    title: "云邮教学空间助手",
+    version: `v${VERSION}`,
+    toggleTitle: "云邮助手设置",
+    actionBindings: {
+      "clear-deleted-homeworks-btn": {
+        onClick: () => this.handleClearDeletedHomeworks(),
+        getState: () => this.getClearDeletedHomeworkButtonState(),
+      },
+    },
+    onSave: () => this.handleSettingsSaved(),
+  });
   this.currentPage = location.href;
   this.observers = new Set();
   this.isBatchDownloading = false; // 批量下载状态
-  this._settingsStylesInjected = false;
-  this._settingsToggle = null;
-  this._settingsPanel = null;
-  this._settingsInitialized = false;
   this._injectedStyles = new Set();
   this._themeActive = false;
   this._unlockCopyBound = false;
@@ -2059,598 +2065,50 @@ export class UCloudEnhancer {
   }
 
   createUI() {
-    if (!Settings.get('system', 'showConfigButton')) {
-    if (this._settingsToggle) this._settingsToggle.style.display = 'none';
-    if (this._settingsPanel) this._settingsPanel.style.display = 'none';
-    this._settingsInitialized = false;
-    return;
-    }
-
-    if (this._settingsInitialized) {
-    if (this._settingsToggle) this._settingsToggle.style.display = '';
-    return;
-    }
-    this._settingsInitialized = true;
-
-    if (!this._settingsStylesInjected) {
-    GM_addStyle(`
-    #yzHelper-settings {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    background: #fff;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
-    border-radius: 12px;
-    z-index: 9999;
-    width: 500px;
-    height: 450px;
-    font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
-    transition: all 0.3s ease;
-    opacity: 0;
-    transform: translateY(10px);
-    color: #333;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    display: none;
-    }
-    #yzHelper-settings.visible {
-    opacity: 1;
-    transform: translateY(0);
-    }
-
-    #yzHelper-header {
-    padding: 15px 20px;
-    border-bottom: 1px solid #ebeef5;
-    background: #fff;
-    color: #303133;
-    font-weight: bold;
-    font-size: 16px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    box-shadow: none;
-    }
-
-    #yzHelper-main {
-    display: flex;
-    flex: 1;
-    overflow: hidden;
-    }
-
-    #yzHelper-settings-sidebar {
-    width: 140px;
-    background: #f5f7fa;
-    padding: 15px 0;
-    border-right: 1px solid #ebeef5;
-    overflow-y: auto;
-    overflow-x: hidden;
-    }
-
-    #yzHelper-settings-sidebar .menu-item {
-    padding: 12px 15px;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    font-size: 14px;
-    color: #606266;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    border-radius: 6px 0 0 6px;
-    margin: 2px 0;
-    }
-
-    #yzHelper-settings-sidebar .menu-item:hover {
-    background: #e3f0fd;
-    color: #409EFF;
-    transform: none;
-    }
-
-    #yzHelper-settings-sidebar .menu-item.active {
-    background: #409EFF;
-    color: #fff;
-    font-weight: 500;
-    box-shadow: none;
-    }
-
-    #yzHelper-settings-sidebar .emoji {
-    font-size: 16px;
-    }
-
-    #yzHelper-settings-content {
-    flex: 1;
-    padding: 20px;
-    overflow-y: auto;
-    position: relative;
-    padding-bottom: 70px;
-    background: #fff;
-    }
-
-    #yzHelper-settings-content .settings-section {
-    display: none;
-    }
-
-    #yzHelper-settings-content .settings-section.active {
-    display: block;
-    }
-
-    #yzHelper-settings h3 {
-    margin-top: 0;
-    margin-bottom: 15px;
-    font-size: 18px;
-    font-weight: 600;
-    color: #303133;
-    padding-bottom: 10px;
-    border-bottom: 1px solid #ebeef5;
-    }
-    #yzHelper-settings .setting-item {
-    margin-bottom: 16px;
-    }
-    #yzHelper-settings .setting-toggle {
-    display: flex;
-    align-items: center;
-    }
-    #yzHelper-settings .setting-item:last-of-type {
-    margin-bottom: 20px;
-    }
-    #yzHelper-settings .switch {
-    position: relative;
-    display: inline-block;
-    width: 44px;
-    height: 24px;
-    margin-right: 10px;
-    }
-    #yzHelper-settings .switch input {
-    opacity: 0;
-    width: 0;
-    height: 0;
-    }
-    #yzHelper-settings .slider {
-    position: absolute;
-    cursor: pointer;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: #dcdfe6;
-    transition: .3s;
-    border-radius: 24px;
-    }
-    #yzHelper-settings .slider:before {
-    position: absolute;
-    content: "";
-    height: 18px;
-    width: 18px;
-    left: 3px;
-    bottom: 3px;
-    background-color: white;
-    transition: .3s;
-    border-radius: 50%;
-    }
-    #yzHelper-settings input:checked + .slider {
-    background: #409EFF;
-    box-shadow: none;
-    }
-    #yzHelper-settings input:focus + .slider {
-    box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.15);
-    }
-    #yzHelper-settings input:checked + .slider:before {
-    transform: translateX(20px);
-    }
-    #yzHelper-settings .setting-label {
-    font-size: 14px;
-    cursor: pointer;
-    }
-
-    #yzHelper-settings .setting-description {
-    display: block;
-    margin-left: 54px;
-    font-size: 12px;
-    color: #666;
-    background: #f5f7fa;
-    border-left: 3px solid #409EFF;
-    border-radius: 0 4px 4px 0;
-    max-height: 0;
-    overflow: hidden;
-    opacity: 0;
-    transition: all 0.3s ease;
-    padding: 0 12px;
-    box-shadow: none;
-    }
-
-    #yzHelper-settings .setting-description.visible {
-    max-height: 100px;
-    opacity: 1;
-    margin-top: 8px;
-    padding: 8px 12px;
-    }
-
-    #yzHelper-settings .buttons {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    position: absolute;
-    bottom: 0px;
-    right: 0px;
-    background: #fff;
-    padding: 10px 20px;
-    width: calc(100% - 40px);
-    border-top: 1px solid #ebeef5;
-    box-sizing: border-box;
-    }
-    #yzHelper-settings button {
-    background: #409EFF;
-    border: none;
-    padding: 8px 16px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-weight: 500;
-    color: #fff;
-    transition: all 0.2s ease;
-    outline: none;
-    font-size: 14px;
-    box-shadow: none;
-    }
-    #yzHelper-settings button:hover {
-    background: #3076c9;
-    transform: none;
-    box-shadow: none;
-    }
-    #yzHelper-settings button.cancel {
-    background: #f5f7fa;
-    color: #606266;
-    box-shadow: none;
-    }
-    #yzHelper-settings button.cancel:hover {
-    background: #e4e7ed;
-    transform: none;
-    box-shadow: none;
-    }
-
-    #yzHelper-settings-toggle {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    background: #409EFF;
-    color: #fff;
-    width: 50px;
-    height: 50px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 24px;
-    cursor: pointer;
-    z-index: 9998;
-    box-shadow: 0 4px 12px rgba(64, 158, 255, 0.15);
-    transition: all 0.3s ease;
-    }
-    #yzHelper-settings-toggle:hover {
-    background: #3076c9;
-    transform: scale(1.05);
-    box-shadow: 0 6px 20px rgba(64, 158, 255, 0.18);
-    }
-
-    #yzHelper-settings input[type="text"],
-    #yzHelper-settings input[type="password"],
-    #yzHelper-settings input[type="email"] {
-    width: 100%;
-    padding: 10px 15px;
-    border: 1px solid #dcdfe6;
-    border-radius: 4px;
-    font-size: 14px;
-    color: #606266;
-    box-sizing: border-box;
-    transition: all 0.3s;
-    outline: none;
-    background: #fff;
-    }
-    #yzHelper-settings input[type="text"]:focus,
-    #yzHelper-settings input[type="password"]:focus,
-    #yzHelper-settings input[type="email"]:focus {
-    border-color: #409EFF;
-    box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.12);
-    }
-
-    #yzHelper-settings .action-btn {
-    background: #f56c6c;
-    color: white;
-    border: none;
-    padding: 8px 16px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 14px;
-    transition: all 0.3s;
-    outline: none;
-    }
-
-    #yzHelper-settings .action-btn:hover {
-    background: #e55353;
-    }
-
-    #yzHelper-settings .action-btn:disabled {
-    background: #c0c4cc;
-    cursor: not-allowed;
-    }
-
-    #yzHelper-settings .action-btn.secondary {
-    background: #409EFF;
-    margin-left: 10px;
-    }
-
-    #yzHelper-settings .action-btn.secondary:hover {
-    background: #337ecc;
-    }
-
-    #yzHelper-settings .setting-toggle {
-    flex-wrap: wrap;
-    gap: 10px;
-    }
-    `);
-    this._settingsStylesInjected = true;
-    }
-
-    // 创建设置按钮
-    let settingsToggle = document.getElementById("yzHelper-settings-toggle");
-    if (!settingsToggle) {
-    settingsToggle = document.createElement('div');
-    settingsToggle.id = "yzHelper-settings-toggle";
-    settingsToggle.title = "云邮助手设置";
-    settingsToggle.innerHTML = SVG_ICONS.settingsGear;
-    document.body.appendChild(settingsToggle);
-    } else {
-    settingsToggle.style.display = '';
-    }
-    this._settingsToggle = settingsToggle;
-
-    // 创建设置面板
-    let settingsPanel = document.getElementById("yzHelper-settings");
-    if (!settingsPanel) {
-    settingsPanel = document.createElement("div");
-    settingsPanel.id = "yzHelper-settings";
-    document.body.appendChild(settingsPanel);
-    }
-    this._settingsPanel = settingsPanel;
-
-    settingsPanel.innerHTML = this.buildSettingsHeader() + this.buildSettingsMainContent();
-    if (!document.body.contains(settingsPanel)) {
-    document.body.appendChild(settingsPanel);
-    }
-
-    // 调整设置图标，替换占位问号
-    try { this.adjustSettingsIcons(settingsToggle, settingsPanel); } catch (e) { /* noop */ }
-
-    // 事件处理
-    this.setupSettingsEvents(settingsToggle, settingsPanel);
+    this.settingsPanel.initialize();
+    const showToggle = Settings.get("system", "showConfigButton");
+    this.settingsPanel.setToggleVisibility(showToggle);
+    this.settingsPanel.refresh();
   }
 
-  buildSettingsHeader() {
-    return `
-    <div id="yzHelper-header">
-    <span>云邮教学空间助手</span>
-    <span id="yzHelper-version">v${VERSION}</span>
-    </div>
-    `;
+  private handleSettingsSaved(): void {
+    this.settingsPanel.setToggleVisibility(Settings.get("system", "showConfigButton"));
+    this.settingsPanel.refreshAction("clear-deleted-homeworks-btn");
+    NotificationManager.show("设置已保存", "刷新页面后生效");
   }
 
-  buildSettingsMainContent() {
-    const sidebarHtml = this.buildSettingsSidebarHtml();
-    const sectionsHtml = this.buildSettingsSectionsHtml();
-    return `
-    <div id="yzHelper-main">
-    <div id="yzHelper-settings-sidebar">
-      ${sidebarHtml}
-    </div>
-    <div id="yzHelper-settings-content">
-      ${sectionsHtml}
-      <div class="buttons">
-        <button id="cancelSettings" class="cancel">取消</button>
-        <button id="saveSettings">保存设置</button>
-      </div>
-    </div>
-    </div>
-    `;
-  }
-
-  buildSettingsSidebarHtml() {
-    return SETTINGS_SECTIONS.map((section, index) => `
-    <div class="menu-item ${index === 0 ? 'active' : ''}" data-section="${section.id}">
-    <span class="emoji">?</span>
-    <span>${Utils.escapeHtml(section.title)}</span>
-    </div>
-    `).join('');
-  }
-
-  buildSettingsSectionsHtml() {
-    return SETTINGS_SECTIONS.map((section, index) => `
-    <div class="settings-section ${index === 0 ? 'active' : ''}" id="section-${section.id}">
-    <h3>${Utils.escapeHtml(section.heading)}</h3>
-    ${section.options.map(option => this.renderSettingOption(section, option)).join('')}
-    </div>
-    `).join('');
-  }
-
-  renderSettingOption(sectionConfig, option) {
-    if (option.type === 'action') {
-    const buttonClass = option.buttonClass || 'action-btn';
-    const description = option.description ? `<div class="setting-description">${Utils.escapeHtml(option.description)}</div>` : '';
-    return `
-    <div class="setting-item">
-      <div class="setting-toggle">
-        <button id="${option.buttonId}" class="${buttonClass}">${Utils.escapeHtml(option.buttonText || '执行')}</button>
-      </div>
-      ${description}
-    </div>
-    `;
-    }
-
-    const category = option.category || sectionConfig.defaultCategory;
-    const key = option.key;
-    if (!category || !key) return '';
-    const inputId = `${category}_${key}`;
-    const descId = `description-${inputId}`;
-    const checked = Settings.get(category, key) ? 'checked' : '';
-    const label = Utils.escapeHtml(option.label);
-    const description = option.description ? Utils.escapeHtml(option.description) : '';
-
-    return `
-    <div class="setting-item">
-    <div class="setting-toggle">
-      <label class="switch">
-        <input type="checkbox" id="${inputId}" ${checked}>
-        <span class="slider"></span>
-      </label>
-      <span class="setting-label" data-for="${descId}">${label}</span>
-    </div>
-    ${description ? `<div class="setting-description" id="${descId}">${description}</div>` : ''}
-    </div>
-    `;
-  }
-
-  getSectionIcon(section) {
-    const iconMap = {
-    gear: SVG_ICONS.settingsGear,
-    home: SVG_ICONS.settingsHome,
-    preview: SVG_ICONS.settingsPreview,
-    course: SVG_ICONS.homeworkCourse,
-    homework: SVG_ICONS.homeworkTeacher,
-    notification: SVG_ICONS.settingsNotification,
-    system: SVG_ICONS.settingsSystem,
-    };
-    return iconMap[section] || '';
-  }
-
-  adjustSettingsIcons(settingsToggle, settingsPanel) {
-    if (settingsToggle) {
-    const gearIcon = this.getSectionIcon('gear');
-    if (gearIcon) settingsToggle.innerHTML = gearIcon;
-    }
-
-    if (!settingsPanel) return;
-
-    Utils.qsa('#yzHelper-settings-sidebar .menu-item', settingsPanel).forEach(item => {
-    const section = item.getAttribute('data-section');
-    const holder = item.querySelector('.emoji');
-    const icon = this.getSectionIcon(section);
-    if (holder && icon) holder.innerHTML = icon;
-    });
-
-    Utils.qsa('#yzHelper-settings-content h3', settingsPanel).forEach(h3 => {
-    try { h3.textContent = (h3.textContent || '').replace(/^[?？]+\s*/, ''); } catch (e) {}
-    });
-  }
-
-  setupSettingsEvents(settingsToggle, settingsPanel) {
-    // 菜单切换功能
-    document.querySelectorAll("#yzHelper-settings-sidebar .menu-item").forEach((item) => {
-    item.addEventListener("click", function () {
-    document.querySelectorAll("#yzHelper-settings-sidebar .menu-item").forEach((i) => {
-      i.classList.remove("active");
-    });
-    document.querySelectorAll("#yzHelper-settings-content .settings-section").forEach((section) => {
-      section.classList.remove("active");
-    });
-
-    this.classList.add("active");
-    const sectionId = "section-" + this.getAttribute("data-section");
-    document.getElementById(sectionId).classList.add("active");
-
-    document.querySelectorAll(".setting-description").forEach((desc) => {
-      desc.classList.remove("visible");
-    });
-    });
-    });
-
-    // 设置描述显示/隐藏功能
-    document.querySelectorAll(".setting-label").forEach((label) => {
-    label.addEventListener("click", function () {
-    const descriptionId = this.getAttribute("data-for");
-    const description = document.getElementById(descriptionId);
-
-    document.querySelectorAll(".setting-description").forEach((desc) => {
-      if (desc.id !== descriptionId) {
-        desc.classList.remove("visible");
-      }
-    });
-
-    description.classList.toggle("visible");
-    });
-    });
-
-    const settingsTrigger = () => {
-    const isVisible = settingsPanel.classList.contains("visible");
-    if (isVisible) {
-    settingsPanel.classList.remove("visible");
-    setTimeout(() => {
-      settingsPanel.style.display = "none";
-    }, 300);
-    } else {
-    settingsPanel.style.display = "flex";
-    void settingsPanel.offsetWidth;
-    settingsPanel.classList.add("visible");
-    }
-    };
-
-    const notifySettingsSaved = () => NotificationManager.show("设置已保存", "刷新页面后生效");
-
-    settingsToggle.addEventListener("click", settingsTrigger);
-
-    document.getElementById("cancelSettings").addEventListener("click", () => {
-    settingsPanel.classList.remove("visible");
-    setTimeout(() => {
-    settingsPanel.style.display = "none";
-    }, 300);
-    });
-
-    document.getElementById("saveSettings").addEventListener("click", () => {
-    Array.from(document.querySelector("#yzHelper-settings-content").querySelectorAll('input[type="checkbox"]')).forEach((checkbox) => {
-    const checkboxId = checkbox.id;
-    if (checkboxId.includes("_")) {
-      const [category, settingName] = checkboxId.split("_");
-      if (Settings.defaults[category] && settingName) {
-        Settings.set(category, settingName, checkbox.checked);
-      }
-    }
-    });
-    settingsPanel.classList.remove("visible");
-    setTimeout(() => {
-    settingsPanel.style.display = "none";
-    notifySettingsSaved();
-    }, 300);
-    });
-
-    // 清空作业回收站按钮事件
-    const clearDeletedBtn = document.getElementById("clear-deleted-homeworks-btn");
-    if (clearDeletedBtn) {
-    const updateButtonState = () => {
-    const deletedCount = Storage.getDeletedHomeworks().length;
-    clearDeletedBtn.textContent = `清空作业回收站 (${deletedCount})`;
-    clearDeletedBtn.disabled = deletedCount === 0;
-    };
-
-    updateButtonState();
-
-    clearDeletedBtn.addEventListener("click", () => {
+  private handleClearDeletedHomeworks(): void {
     const deletedHomeworks = Storage.getDeletedHomeworks();
     if (deletedHomeworks.length === 0) {
-      notifySettingsSaved();
+      NotificationManager.show("提示", "回收站为空");
       return;
     }
+    if (!confirm(`确定要清空回收站中的 ${deletedHomeworks.length} 个作业吗？此操作不可恢复！`)) {
+      return;
+    }
+    Storage.clearDeletedHomeworks();
+    this.homework.updateTrashBinSummary();
+    NotificationManager.show("已清空", "回收站已清空");
+    this.settingsPanel.refreshAction("clear-deleted-homeworks-btn");
+  }
 
-    if (confirm(`确定要清空回收站中的 ${deletedHomeworks.length} 个作业吗？此操作不可恢复！`)) {
-      Storage.clearDeletedHomeworks();
-      this.homework.updateTrashBinSummary();
-      updateButtonState();
-      notifySettingsSaved();
-    }
-    });
-    }
+  private getClearDeletedHomeworkButtonState() {
+    const deletedCount = Storage.getDeletedHomeworks().length;
+    return {
+      label: `清空作业回收站 (${deletedCount})`,
+      disabled: deletedCount === 0,
+    };
   }
 
   registerMenuCommands() {
     GM_registerMenuCommand('显示/隐藏插件悬浮窗', () => {
     const current = Settings.get('system', 'showConfigButton');
-    Settings.set('system', 'showConfigButton', !current);
+    const next = !current;
+    Settings.set('system', 'showConfigButton', next);
+    this.settingsPanel.setToggleVisibility(next);
+    if (next) {
+      this.settingsPanel.refresh();
+    }
     NotificationManager.show('设置已更新', '页面刷新后生效');
     });
     // 切换调试日志
