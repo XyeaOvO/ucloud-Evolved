@@ -12,7 +12,10 @@ import { isCourseRoute, isNotificationRoute } from "./routing";
 import { handleCoursesPage as handleCoursesPageFlow } from "./pages/course-list";
 import { handleCourseHome as handleCourseHomeFlow } from "./pages/course-detail";
 import { handleNotificationPage as handleNotificationPageFlow } from "./pages/notification";
-import { CourseResourceContext } from "./pages/course-resources";
+import {
+  CourseResourceContext,
+  resolveSingleFileName as resolveCourseResourceFileName,
+} from "./pages/course-resources";
 import { API, AssignmentSummary, UndoneListResponse } from "../core/api";
 import { Storage, StoredCourseInfo } from "../core/storage";
 
@@ -1296,7 +1299,11 @@ export class UCloudEnhancer {
 
     resources.forEach((resource, index) => {
     const filename = resolveFilename(resource, index);
-    const downloadName = this.resolveSingleFileName(filename, courseName, `附件-${index + 1}`);
+    const downloadName = resolveCourseResourceFileName(
+      filename,
+      courseName,
+      `附件-${index + 1}`
+    );
     const targetNode = pickNodeForResource(resource, index, filename);
     if (!targetNode) return;
 
@@ -1592,81 +1599,6 @@ export class UCloudEnhancer {
     if (!Number.isFinite(concurrency)) concurrency = 1;
     concurrency = Math.max(1, Math.min(10, Math.floor(concurrency)));
     this.downloadManager.setConcurrency(concurrency);
-  }
-
-  private resolveZipFilename(courseName?: string | null): string {
-    const base = this.resolveDownloadBasename(courseName);
-    return base.toLowerCase().endsWith(".zip") ? base : `${base}.zip`;
-  }
-
-  private resolveDownloadBasename(courseName?: string | null): string {
-    const templateRaw = Settings.get("course", "downloadNameTemplate");
-    const template =
-      typeof templateRaw === "string" && templateRaw.trim().length
-        ? templateRaw.trim()
-        : "{{course}}-{{date}}";
-    const fallbackCourse =
-      courseName && String(courseName).trim() ? String(courseName).trim() : "课程资源";
-    const timestamp = Utils.formatDateForFilename();
-    const replacements: Record<string, string> = {
-      course: fallbackCourse,
-      date: timestamp,
-      timestamp,
-    };
-    let resolved = template;
-    Object.entries(replacements).forEach(([token, value]) => {
-      const pattern = new RegExp(`\\{\\{\\s*${token}\\s*\\}\\}`, "gi");
-      resolved = resolved.replace(pattern, value);
-    });
-    resolved = resolved.replace(/\\{\\{[^}]+\\}\\}/g, "").trim();
-    if (!resolved.length) {
-      resolved = `${fallbackCourse}-${timestamp}`;
-    }
-    const sanitized = Utils.sanitizeFilename(resolved);
-    return sanitized || "课程资源";
-  }
-
-  private resolveSingleFileName(
-    resourceName: string | null | undefined,
-    courseName?: string | null,
-    fallback?: string
-  ): string {
-    const pickName = (...candidates: Array<string | null | undefined>): string => {
-      for (const candidate of candidates) {
-        if (typeof candidate === "string") {
-          const trimmed = candidate.trim();
-          if (trimmed.length) {
-            return trimmed;
-          }
-        }
-      }
-      return "file";
-    };
-
-    const rawName = pickName(resourceName, fallback);
-    let sanitizedResource = Utils.sanitizeFilename(rawName);
-    if (
-      sanitizedResource === "file" &&
-      typeof fallback === "string" &&
-      fallback.trim().length &&
-      fallback.trim() !== rawName
-    ) {
-      sanitizedResource = Utils.sanitizeFilename(fallback);
-    }
-
-    const base = this.resolveDownloadBasename(courseName);
-    const prefix = base.replace(/\\.zip$/i, "").trim() || base;
-    if (!prefix.length) {
-      return sanitizedResource;
-    }
-
-    const dotIndex = sanitizedResource.lastIndexOf(".");
-    const namePart = dotIndex >= 0 ? sanitizedResource.slice(0, dotIndex) : sanitizedResource;
-    const ext = dotIndex >= 0 ? sanitizedResource.slice(dotIndex) : "";
-    const effectiveName = namePart.trim().length ? namePart : "file";
-    const combined = [prefix, effectiveName].filter(Boolean).join("-");
-    const sanitizedCombined = Utils.sanitizeFilename(combined);
-    return ext ? `${sanitizedCombined}${ext}` : sanitizedCombined;
   }
 
   registerMenuCommands() {
