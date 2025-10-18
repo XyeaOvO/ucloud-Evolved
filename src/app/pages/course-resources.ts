@@ -20,6 +20,28 @@ declare function GM_download(options: {
   onerror?: (error: Record<string, unknown>) => void;
 }): unknown;
 
+type ResourceIdentifier = string | number | null | undefined;
+
+export interface CourseResource {
+  id?: ResourceIdentifier;
+  resourceId?: ResourceIdentifier;
+  storageId?: ResourceIdentifier;
+  attachmentId?: ResourceIdentifier;
+  storage?: { id?: ResourceIdentifier } | null;
+  name?: string | null;
+  resourceName?: string | null;
+  fileName?: string | null;
+  path?: string | null;
+}
+
+interface ResolvedResource {
+  resource: CourseResource;
+  previewEl: HTMLElement | null;
+}
+
+const describeError = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error ?? "未知错误");
+
 export interface CourseResourceContext {
   downloadManager: DownloadManager;
   isBatchDownloading(): boolean;
@@ -29,20 +51,34 @@ export interface CourseResourceContext {
 
 export async function setupCourseResources(
   context: CourseResourceContext,
-  resources: any[]
+  resources: CourseResource[]
 ): Promise<void> {
   if (!resources.length) return;
 
-  const resourceItems = Utils.$x(CONSTANTS.SELECTORS.resourceItems);
-  const previewItems = Utils.$x(CONSTANTS.SELECTORS.previewItems);
+  const resourceItems = Utils.$x(CONSTANTS.SELECTORS.resourceItems).filter(
+    (node): node is HTMLElement => node instanceof HTMLElement
+  );
+  const previewItems = Utils.$x(CONSTANTS.SELECTORS.previewItems).filter(
+    (node): node is HTMLElement => node instanceof HTMLElement
+  );
 
   if (!resourceItems.length) return;
 
   const courseName = context.getCurrentCourseTitle();
 
-  const getResourceId = (res: Record<string, unknown>): string | null => {
-    if (!res || typeof res !== "object") return null;
-    const candidates = [res.id, res.resourceId, res.storageId, res.attachmentId, res.storage?.id];
+  const getResourceId = (res: CourseResource | null | undefined): string | null => {
+    if (!res) return null;
+    const storageIdCandidate =
+      res.storage && typeof res.storage === "object"
+        ? ((res.storage as { id?: ResourceIdentifier }).id ?? null)
+        : null;
+    const candidates: ResourceIdentifier[] = [
+      res.id,
+      res.resourceId,
+      res.storageId,
+      res.attachmentId,
+      storageIdCandidate,
+    ];
     for (const candidate of candidates) {
       if (candidate !== undefined && candidate !== null && candidate !== "") {
         return String(candidate);
@@ -51,8 +87,8 @@ export async function setupCourseResources(
     return null;
   };
 
-  const resourceById = new Map<string, any>();
-  const resourceNameBuckets = new Map<string, any[]>();
+  const resourceById = new Map<string, CourseResource>();
+  const resourceNameBuckets = new Map<string, CourseResource[]>();
   resources.forEach((res) => {
     const id = getResourceId(res);
     if (id) resourceById.set(id, res);
@@ -63,7 +99,7 @@ export async function setupCourseResources(
     }
   });
 
-  const usedResources = new Set<any>();
+  const usedResources = new Set<CourseResource>();
   const idAttrRegex = /(resource|storage).*id/i;
   const idCandidateCache = new WeakMap<Element, Set<string>>();
   const nameCandidateCache = new WeakMap<Element | null, Set<string>>();
@@ -139,7 +175,7 @@ export async function setupCourseResources(
     return out;
   };
 
-  const previewLookup = new Map<string, Element>();
+  const previewLookup = new Map<string, HTMLElement>();
   previewItems.forEach((previewEl) => {
     collectIdCandidates(previewEl).forEach((id) => {
       if (id && !previewLookup.has(id)) {
@@ -148,7 +184,7 @@ export async function setupCourseResources(
     });
   });
 
-  const takeResourceFromBucket = (name: string): any | null => {
+  const takeResourceFromBucket = (name: string): CourseResource | null => {
     const bucket = resourceNameBuckets.get(name);
     if (!bucket || bucket.length === 0) return null;
     const idx = bucket.findIndex((res) => !usedResources.has(res));
@@ -158,9 +194,9 @@ export async function setupCourseResources(
   };
 
   const resolveResourceForElement = (
-    element: Element,
+    element: HTMLElement,
     fallbackIndex: number
-  ): { resource: any; previewEl: Element | null } | null => {
+  ): ResolvedResource | null => {
     const fallbackPreview = previewItems[fallbackIndex] || null;
     const idCandidates = new Set<string>([
       ...collectIdCandidates(element),
@@ -218,7 +254,7 @@ export async function setupCourseResources(
     const resourceId = getResourceId(resource);
     if (resourceId) {
       element.dataset.uepResourceId = resourceId;
-      if (previewEl && previewEl instanceof Element) {
+      if (previewEl) {
         previewEl.dataset.uepResourceId = resourceId;
       }
     }
@@ -227,13 +263,18 @@ export async function setupCourseResources(
       resource?.name || resource?.resourceName || resource?.fileName || `文件_${index + 1}`;
     const downloadName = resolveSingleFileName(rawName, courseName, `文件_${index + 1}`);
 
-    if (Settings.get("preview", "autoDownload") && previewEl && !previewEl.dataset.uepAutoDownloadBound) {
+    if (
+      Settings.get("preview", "autoDownload") &&
+      previewEl &&
+      !previewEl.dataset.uepAutoDownloadBound
+    ) {
       previewEl.dataset.uepAutoDownloadBound = "1";
       previewEl.addEventListener(
         "click",
         async () => {
+          if (!resourceId) return;
           try {
-            const { previewUrl } = await API.getPreviewURL(resource.id);
+            const { previewUrl } = await API.getPreviewURL(resourceId);
             await context.downloadManager.downloadFile(previewUrl, downloadName);
           } catch (error) {
             LOG.error("Auto download error:", error);
@@ -243,9 +284,12 @@ export async function setupCourseResources(
       );
     }
 
-    if (Settings.get("course", "showAllDownloadButton") && !element.dataset.uepDownloadButtonBound) {
+    if (
+      Settings.get("course", "showAllDownloadButton") &&
+      !element.dataset.uepDownloadButtonBound
+    ) {
       element.dataset.uepDownloadButtonBound = "1";
-      addDownloadButton(context, element as HTMLElement, resource, index, downloadName);
+      addDownloadButton(context, element, resource, index, downloadName);
     }
   });
 
@@ -336,22 +380,41 @@ export function resolveSingleFileName(
   return ext ? `${sanitizedCombined}${ext}` : sanitizedCombined;
 }
 
+type ZipEntry = {
+  name: string;
+  relativePath: string;
+  encodedPath: string;
+  size: number;
+};
+
+interface ZipTreeNode {
+  name: string;
+  children: Map<string, ZipTreeNode>;
+  files: ZipEntry[];
+}
+
+type JSZipConstructor = new () => JSZipInstance;
+
+interface JSZipInstance {
+  folder(name: string): JSZipInstance;
+  file(name: string, data: BlobPart | ArrayBuffer): void;
+  generateAsync(
+    options: { type: "blob" },
+    onUpdate?: (metadata: { percent?: number }) => void
+  ): Promise<Blob>;
+}
+
 async function downloadResourcesAsZip(
   context: CourseResourceContext,
-  resources: any[]
+  resources: CourseResource[]
 ): Promise<"success" | "cancelled"> {
-  const JSZip = await Utils.ensureJSZip();
+  const JSZip = (await Utils.ensureJSZip()) as JSZipConstructor;
   const zip = new JSZip();
   const courseName = context.getCurrentCourseTitle();
   const rootName = Utils.sanitizeFilename(courseName) || "课程资源";
   const rootFolder = zip.folder(rootName);
   const nameTracker = new Map<string, Set<string>>();
-  const entries: Array<{
-    name: string;
-    relativePath: string;
-    encodedPath: string;
-    size: number;
-  }> = [];
+  const entries: ZipEntry[] = [];
   const downloadManager = context.downloadManager;
   const progress = downloadManager.ensureProgress();
   downloadManager.downloading = true;
@@ -370,13 +433,21 @@ async function downloadResourcesAsZip(
     for (let index = 0; index < resources.length; index++) {
       if (!context.isBatchDownloading()) throw new Error("用户取消");
       const resource = resources[index];
-      const safeName = Utils.sanitizeFilename(resource.name || `文件_${index + 1}`);
-      const pathSegments = Utils.toPathSegments(resource.path);
+      const safeName = Utils.sanitizeFilename(
+        resource.name || resource.resourceName || resource.fileName || `文件_${index + 1}`
+      );
+      const pathSegments = Utils.toPathSegments(resource.path ?? "");
       const folderKey = pathSegments.join("/") || ".";
       const finalName = dedupeFileName(folderKey, safeName, nameTracker);
       const relativeSegments = pathSegments.length ? [...pathSegments, finalName] : [finalName];
 
-      const { previewUrl } = await Utils.withRetry(() => API.getPreviewURL(resource.id), 3, 400);
+      const resourceId = getResourceId(resource);
+      if (!resourceId) {
+        LOG.warn("downloadResourcesAsZip: missing resource id", { resource });
+        continue;
+      }
+
+      const { previewUrl } = await Utils.withRetry(() => API.getPreviewURL(resourceId), 3, 400);
       if (!context.isBatchDownloading()) throw new Error("用户取消");
 
       const buffer = await downloadManager.fetchBinary(previewUrl, {
@@ -393,11 +464,14 @@ async function downloadResourcesAsZip(
 
       if (!context.isBatchDownloading()) throw new Error("用户取消");
 
-      const fileData = buffer instanceof ArrayBuffer ? buffer : buffer?.buffer || buffer;
-      const folder = pathSegments.reduce((acc: any, segment: string) => acc.folder(segment), rootFolder);
+      const fileData: ArrayBuffer = buffer;
+      const folder = pathSegments.reduce<JSZipInstance>(
+        (acc, segment) => acc.folder(segment),
+        rootFolder
+      );
       folder.file(finalName, fileData);
 
-      const size = fileData instanceof ArrayBuffer ? fileData.byteLength : fileData?.length || 0;
+      const size = fileData.byteLength;
       const relativePath = relativeSegments.join("/");
       entries.push({
         name: finalName,
@@ -437,13 +511,14 @@ async function downloadResourcesAsZip(
     downloadManager.saveBlob(blob, zipName);
     NotificationManager.show("打包完成", `成功打包 ${entries.length} 个文件`);
     return "success";
-  } catch (error: any) {
-    if (/取消/.test(error?.message || "") || error?.message === "下载已取消") {
+  } catch (error: unknown) {
+    const message = describeError(error);
+    if (/取消/.test(message) || message === "下载已取消") {
       NotificationManager.show("已取消", "批量打包已停止", "info");
       return "cancelled";
     }
     LOG.error("Zip download error:", error);
-    NotificationManager.show("打包失败", error?.message || "未知错误", "error");
+    NotificationManager.show("打包失败", message || "未知错误", "error");
     throw error;
   } finally {
     downloadManager.resetTransferState();
@@ -452,7 +527,7 @@ async function downloadResourcesAsZip(
 
 async function runLegacyBatchDownload(
   context: CourseResourceContext,
-  resources: any[]
+  resources: CourseResource[]
 ): Promise<"completed" | "cancelled"> {
   const downloadManager = context.downloadManager;
   const useGM = typeof GM_download === "function";
@@ -491,7 +566,12 @@ async function runLegacyBatchDownload(
       const maxAttempts = 5;
       while (context.isBatchDownloading() && attempt < maxAttempts) {
         try {
-          const { previewUrl } = await fetchPreview(resource.id);
+          const resourceId = getResourceId(resource);
+          if (!resourceId) {
+            LOG.warn("runLegacyBatchDownload: missing resource id", { resource });
+            break;
+          }
+          const { previewUrl } = await fetchPreview(resourceId);
           if (!context.isBatchDownloading()) return;
           if (useGM) {
             await downloadManager.downloadViaGM(previewUrl, downloadName, false);
@@ -525,7 +605,7 @@ async function runLegacyBatchDownload(
   }
 }
 
-function addBatchDownloadButton(context: CourseResourceContext, resources: any[]): void {
+function addBatchDownloadButton(context: CourseResourceContext, resources: CourseResource[]): void {
   if (document.getElementById("downloadAllButton")) return;
 
   const buttonHtml = `
@@ -585,7 +665,7 @@ function addBatchDownloadButton(context: CourseResourceContext, resources: any[]
 function addDownloadButton(
   context: CourseResourceContext,
   container: HTMLElement,
-  resource: any,
+  resource: CourseResource,
   index: number,
   resolvedName: string
 ): void {
@@ -609,8 +689,13 @@ function addDownloadButton(
     "click",
     async (e) => {
       e.stopPropagation();
+      const resourceId = getResourceId(resource);
+      if (!resourceId) {
+        NotificationManager.show("下载失败", "未找到资源标识", "error");
+        return;
+      }
       try {
-        const { previewUrl } = await API.getPreviewURL(resource.id);
+        const { previewUrl } = await API.getPreviewURL(resourceId);
         const useGM = typeof GM_download === "function";
         const fallbackName =
           resolvedName && typeof resolvedName === "string"
@@ -625,9 +710,9 @@ function addDownloadButton(
         } else {
           await context.downloadManager.downloadFile(previewUrl, fallbackName);
         }
-      } catch (error: any) {
+      } catch (error: unknown) {
         LOG.error("Download error:", error);
-        NotificationManager.show("下载失败", error?.message || "未知错误", "error");
+        NotificationManager.show("下载失败", describeError(error), "error");
       }
     },
     false
@@ -660,40 +745,43 @@ function dedupeFileName(
   return candidate;
 }
 
-function buildZipIndexHtml(courseName: string, entries: Array<{ name: string; relativePath: string; encodedPath: string; size: number }>): string {
-  const tree = { name: "", children: new Map<string, any>(), files: [] as typeof entries };
+function buildZipIndexHtml(courseName: string, entries: ZipEntry[]): string {
+  const tree: ZipTreeNode = { name: "", children: new Map(), files: [] };
   const collator =
     typeof Intl !== "undefined" && Intl.Collator
       ? new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" })
       : null;
   const compare = (a: string, b: string) => (collator ? collator.compare(a, b) : a.localeCompare(b));
 
-  const addEntry = (relativePath: string, entry: (typeof entries)[number]) => {
+  const addEntry = (relativePath: string, entry: ZipEntry) => {
     const segments = relativePath.split("/").filter(Boolean);
-    let node: any = tree;
-    for (let i = 0; i < segments.length - 1; i++) {
+    let node = tree;
+    for (let i = 0; i < segments.length - 1; i += 1) {
       const segment = segments[i];
-      if (!node.children.has(segment)) {
-        node.children.set(segment, { name: segment, children: new Map<string, any>(), files: [] });
+      let child = node.children.get(segment);
+      if (!child) {
+        child = { name: segment, children: new Map(), files: [] };
+        node.children.set(segment, child);
       }
-      node = node.children.get(segment);
+      node = child;
     }
     node.files.push(entry);
   };
 
   entries.forEach((entry) => addEntry(entry.relativePath, entry));
 
-  const renderNode = (node: any): string => {
+  const renderNode = (node: ZipTreeNode): string => {
     const childFolders = Array.from(node.children.keys()).sort(compare);
-    const files = node.files.slice().sort((a: any, b: any) => compare(a.name, b.name));
+    const files = node.files.slice().sort((a, b) => compare(a.name, b.name));
     let html = "<ul>";
 
     childFolders.forEach((folderName) => {
       const child = node.children.get(folderName);
+      if (!child) return;
       html += `<li class="folder"><span>${Utils.escapeHtml(folderName)}</span>${renderNode(child)}</li>`;
     });
 
-    files.forEach((file: any) => {
+    files.forEach((file) => {
       html += `<li class="file"><a href="${file.encodedPath}" download="${Utils.escapeHtml(
         file.name
       )}">${Utils.escapeHtml(file.name)}</a><span class="size">${Utils.escapeHtml(
