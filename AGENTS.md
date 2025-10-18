@@ -29,3 +29,4 @@ This is a UserScript, so there is no build process. To use or develop this scrip
 *   There is a `SETTINGS_SECTIONS` constant that defines the configuration options for the script, which are then managed by the `Settings` class.
 *   完成任意一个需求后，记得在 `ucloud-evolved-plus-optimization.md` 中勾选对应的需求项。
 *   每次进行任何改动（即便是极小的调整）都需要立即提交一次 commit，保持变更可追溯。
+*   每次优化完记得及时更新ucloud-evolved-plus-optimization.md。

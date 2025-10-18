@@ -1,13 +1,13 @@
 // @ts-nocheck
 import { VERSION, CONSTANTS, SVG_ICONS } from "../constants";
-import { LOG, UEP_LOG } from "../core/logger";
+import { LOG, UEP_LOG, setDebugFlag } from "../core/logger";
 import { Utils } from "../utils";
 import { Settings, SETTINGS_SECTIONS } from "../settings";
 import { DownloadManager } from "../services/download-manager";
 import { CourseExtractor } from "../services/course-extractor";
 import { NotificationManager } from "../services/notification-manager";
+import { HomeworkModule } from "./homework/module";
 import { isCourseRoute, isNotificationRoute } from "./routing";
-import { isHomeworkTrashEnabled } from "./homework-utils";
 import { API, AssignmentSummary, UndoneListResponse } from "../core/api";
 import { Storage, StoredCourseInfo } from "../core/storage";
 
@@ -15,15 +15,13 @@ export class UCloudEnhancer {
   private downloadManager: DownloadManager;
   private courseExtractor: CourseExtractor;
   private currentPage: string;
+  private homework: HomeworkModule;
   private observers: Set<{ disconnect?: () => void }>;
   private isBatchDownloading: boolean;
   private _settingsStylesInjected: boolean;
   private _settingsToggle: HTMLElement | null;
   private _settingsPanel: HTMLElement | null;
   private _settingsInitialized: boolean;
-  private _homeworkStylesInjected: boolean;
-  private _homeworkSkeletonCleanup: (() => void) | null;
-  private _homeworkSkeletonStylesInjected: boolean;
   private _injectedStyles: Set<string>;
   private _themeActive: boolean;
   private _unlockCopyBound: boolean;
@@ -36,6 +34,7 @@ export class UCloudEnhancer {
   constructor() {
   this.downloadManager = new DownloadManager();
   this.courseExtractor = new CourseExtractor(); // 新增课程提取器
+  this.homework = new HomeworkModule();
   this.currentPage = location.href;
   this.observers = new Set();
   this.isBatchDownloading = false; // 批量下载状态
@@ -43,9 +42,6 @@ export class UCloudEnhancer {
   this._settingsToggle = null;
   this._settingsPanel = null;
   this._settingsInitialized = false;
-  this._homeworkStylesInjected = false;
-  this._homeworkSkeletonCleanup = null;
-  this._homeworkSkeletonStylesInjected = false;
   this._injectedStyles = new Set();
   this._themeActive = false;
   this._unlockCopyBound = false;
@@ -698,104 +694,183 @@ export class UCloudEnhancer {
 
     if (!enableNewView) return;
 
-    this.renderUnifiedHomeworkSkeleton();
+    this.homework.renderSkeleton();
 
     try {
     const undoneList = await API.getUndoneList() as UndoneListResponse;
     const assignments = undoneList.data?.undoneList;
     if (!assignments?.length) {
-      this.showHomeworkError('暂无待办作业');
+      this.homework.showError('暂无待办作业');
       return;
     }
 
     // 创建统一的作业显示视图
-    await this.createUnifiedHomeworkView(assignments);
-    this.clearHomeworkSkeleton();
+    await this.homework.render(assignments);
+    this.homework.clearSkeleton();
     } catch (error) {
     LOG.error('Handle home page error:', error);
-    this.showHomeworkError('作业数据加载失败');
+    this.homework.showError('作业数据加载失败');
     }
   }
 
-  renderUnifiedHomeworkSkeleton(count = 4) {
-    if (this._homeworkSkeletonCleanup) return;
-
-    let panel = document.getElementById('unified-homework-panel');
-    if (!panel) {
-      this.insertUnifiedHomeworkPanel([], {});
-      panel = document.getElementById('unified-homework-panel');
-    }
-    if (!panel) return;
-
-    this.addUnifiedHomeworkStyles();
-    this.addHomeworkSkeletonStyles();
-
-    panel.classList.add('is-skeleton');
-    const countLabel = panel.querySelector('#homework-count');
-    if (countLabel) {
-      countLabel.textContent = '加载中…';
-    }
-    const list = panel.querySelector('.unified-homework-list');
-    if (list instanceof HTMLElement) {
-      const placeholders = Array.from({ length: count })
-        .map(
-          () => `
-            <div class="homework-skeleton-card">
-              <div class="homework-skeleton-line wide"></div>
-              <div class="homework-skeleton-line medium"></div>
-              <div class="homework-skeleton-line short"></div>
-            </div>
-          `
-        )
-        .join('');
-      list.innerHTML = placeholders;
-    }
-
-    const cleanup = () => {
-      if (panel) {
-        panel.classList.remove('is-skeleton');
-        const listEl = panel.querySelector('.unified-homework-list');
-        if (listEl instanceof HTMLElement) {
-          listEl.querySelectorAll('.homework-skeleton-card').forEach((item) => item.remove());
-        }
+  private getCourseHomeParams(): URLSearchParams {
+    const hash = location.hash || '';
+    const questionIndex = hash.indexOf('?');
+    if (questionIndex !== -1) {
+      const hashQuery = hash.slice(questionIndex + 1);
+      try {
+        return new URLSearchParams(hashQuery);
+      } catch {
+        LOG.debug('解析 hash 查询参数失败，将尝试使用 search');
       }
-      this._homeworkSkeletonCleanup = null;
+    }
+
+    const search = location.search || '';
+    if (search.startsWith('?')) {
+      try {
+        return new URLSearchParams(search.slice(1));
+      } catch {
+        LOG.debug('解析 search 查询参数失败，返回空参数');
+      }
+    }
+    return new URLSearchParams();
+  }
+
+  private resolveStoredSiteId(): string {
+    const extractIdFromPayload = (payload: unknown): string => {
+      if (!payload || typeof payload !== 'object') return '';
+      const record = payload as Record<string, unknown>;
+      const candidate =
+        record.siteId ??
+        record.siteid ??
+        record.id ??
+        record.courseId ??
+        record.courseid ??
+        record.course_id ??
+        record.site_id;
+      if (
+        candidate === undefined ||
+        candidate === null ||
+        (typeof candidate === 'string' && candidate.trim() === '')
+      ) {
+        return '';
+      }
+      return String(candidate).trim();
     };
 
-    this._homeworkSkeletonCleanup = cleanup;
-  }
+    const directCandidates = [
+      sessionStorage.getItem('siteId'),
+      localStorage.getItem('siteId'),
+    ];
 
-  clearHomeworkSkeleton() {
-    if (typeof this._homeworkSkeletonCleanup === 'function') {
-      this._homeworkSkeletonCleanup();
+    for (const candidate of directCandidates) {
+      if (candidate && candidate.trim()) {
+        return candidate.trim();
+      }
     }
-  }
 
-  showHomeworkError(message) {
-    this.clearHomeworkSkeleton();
-    const panel = document.getElementById('unified-homework-panel');
-    if (!panel) return;
-    const list = panel.querySelector('.unified-homework-list');
-    if (list instanceof HTMLElement) {
-      list.innerHTML = `<div class="homework-error">${Utils.escapeHtml(message)}</div>`;
+    const sources = [
+      sessionStorage.getItem('site'),
+      localStorage.getItem('site'),
+    ];
+
+    for (const raw of sources) {
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        const id = extractIdFromPayload(parsed);
+        if (id) return id;
+      } catch {
+        // ignore JSON parse errors
+      }
     }
+
+    return '';
   }
 
-  // 添加简化主页方法
-  async simplifyHomePage() {
+  async handleCourseHome(): Promise<void> {
+    const params = this.getCourseHomeParams();
+    let siteId = this.resolveStoredSiteId();
+    let siteIdSource: 'storage' | 'url' = 'storage';
+
+    if (!siteId) {
+      const paramCandidate =
+        params.get('siteId') ??
+        params.get('courseId') ??
+        params.get('siteid') ??
+        params.get('courseid');
+      if (paramCandidate && paramCandidate.trim()) {
+        siteId = paramCandidate.trim();
+        siteIdSource = 'url';
+      }
+    }
+
+    if (!siteId) {
+      LOG.warn('handleCourseHome: 未找到 siteId，跳过资源增强');
+      return;
+    }
+
+    LOG.debug('handleCourseHome: resolved siteId', { siteId, source: siteIdSource });
+
+    const courseName =
+      params.get('courseName') ??
+      params.get('courseTitle') ??
+      params.get('name') ??
+      '';
+
+    if (Settings.get('system', 'betterTitle') && courseName) {
+      document.title = `[课程] ${courseName} - 教学云空间`;
+    }
+
     try {
-    // 等待关键元素加载完成，确保能够找到它们
-    await Utils.wait(() => document.querySelector('.menu-nav.el-row') && document.querySelector('.home-right-container.home-inline-block'), 5000);
+      await Utils.wait(
+        () => Utils.qs('.resource-item') || Utils.qs('.resource-tree'),
+        {
+          timeout: 8000,
+          observerOptions: { childList: true, subtree: true },
+          label: 'course-resources',
+          logTimeout: false,
+        }
+      );
+    } catch (error) {
+      LOG.debug('等待课程资源节点超时，继续尝试注入下载增强:', error);
+    }
+
+    try {
+      const resources = await API.getSiteResources(siteId);
+      if (!Array.isArray(resources) || resources.length === 0) {
+        LOG.debug('handleCourseHome: 未获取到课程资源数据', { siteId });
+        return;
+      }
+      LOG.debug('handleCourseHome: fetched course resources', { count: resources.length });
+      await this.setupCourseResources(resources);
+    } catch (error) {
+      LOG.error('处理课程主页资源失败:', error);
+    }
+  }
+
+  private async simplifyHomePage(): Promise<void> {
+    try {
+    await Utils.wait(
+      () =>
+        document.querySelector('.menu-nav.el-row') &&
+        document.querySelector('.home-right-container.home-inline-block'),
+      5000
+    );
     const body = document.body;
     if (!body) return;
 
     if (typeof this._homeSimplifyCleanup === 'function') {
-    try { this._homeSimplifyCleanup(); } catch (_) { /* ignore */ }
-    this._homeSimplifyCleanup = null;
+      try {
+        this._homeSimplifyCleanup();
+      } catch {
+        // ignore
+      }
+      this._homeSimplifyCleanup = null;
     }
 
     if (!this._simplifyStylesInjected) {
-    GM_addStyle(`
+      GM_addStyle(`
       body.uep-home-simplified .menu-nav.el-row {
         display: none !important;
       }
@@ -810,1730 +885,17 @@ export class UCloudEnhancer {
         float: none !important;
       }
     `);
-    this._simplifyStylesInjected = true;
+      this._simplifyStylesInjected = true;
     }
 
     body.classList.add('uep-home-simplified');
     this._homeSimplifyCleanup = () => {
-    body.classList.remove('uep-home-simplified');
+      body.classList.remove('uep-home-simplified');
     };
     LOG.debug('已通过样式方式简化主页布局。');
     } catch (error) {
     LOG.error('简化主页失败：无法应用样式。', error);
     }
-  }
-
-  async handleCourseHome() {
-    const readSite = (storage, label) => {
-    if (!storage) return null;
-    try {
-    const raw = storage.getItem('site');
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw);
-    } catch (error) {
-      LOG.warn(`课程信息缓存解析失败（${label}），已清理损坏的数据。`, error);
-      try { storage.removeItem('site'); } catch (_) { /* ignore */ }
-      return null;
-    }
-    } catch (error) {
-    LOG.warn(`读取课程缓存失败（${label}）`, error);
-    return null;
-    }
-    };
-
-    let site = readSite(localStorage, 'local');
-    if (!site) {
-    site = readSite(sessionStorage, 'session') || {};
-    }
-
-    if (!site.id) return;
-
-    if (Settings.get('system', 'betterTitle')) {
-    document.title = `[课程] ${site.siteName} - 教学云空间`;
-    }
-
-    try {
-    const resources = await API.getSiteResources(site.id);
-    await this.setupCourseResources(resources);
-    } catch (error) {
-    LOG.error('Handle course home error:', error);
-    }
-  }
-
-
-
-  handleNotificationPage() {
-    if (Settings.get('system', 'betterTitle')) {
-    document.title = '通知 - 教学云空间';
-    }
-
-    const notificationSettings = Settings.current?.notification || Settings.defaults.notification;
-    const { sortNotificationsByTime, betterNotificationHighlight } = notificationSettings;
-
-    if (!sortNotificationsByTime && !betterNotificationHighlight) {
-    return;
-    }
-
-    const listSelector = CONSTANTS.SELECTORS.notificationList;
-    const loadingMaskSelector = CONSTANTS.SELECTORS.notificationLoadingMask;
-    const timestampSelector = CONSTANTS.SELECTORS.notificationTimestamp;
-    const dotSelector = CONSTANTS.SELECTORS.notificationDot;
-
-    let isProcessingNotifications = false;
-    let hasInitializedListObserver = false;
-    const MANUAL_HIGHLIGHT_SUPPRESS_MS = 2000; // 给后台同步“已读”状态留出缓冲
-
-    let processNotifications = () => {};
-    const scheduleNotificationRefresh = Utils.debounce(() => {
-    try { processNotifications(); } catch (e) { LOG.warnThrottled('notification-refresh', 'Process notifications failed:', e); }
-    }, 250);
-
-    const suppressHighlightTemporarily = (item) => {
-    if (!(item instanceof HTMLElement)) return;
-    item.dataset.uepManualSuppressUntil = String(Date.now() + MANUAL_HIGHLIGHT_SUPPRESS_MS);
-    item.classList.remove('notification-with-dot');
-    };
-
-    const handleMarkReadClick = (event) => {
-    if (!betterNotificationHighlight) return;
-    const target = event.target;
-    if (!target) return;
-    const actionEl = target.closest('button, a, span, i');
-    if (!actionEl) return;
-    const text = actionEl.textContent ? actionEl.textContent.replace(/\s+/g, '') : '';
-    if (!text || !text.includes('标记已读')) return;
-
-    const container = Utils.qs(listSelector);
-    if (!container) return;
-
-    if (text.includes('全部')) {
-    Utils.qsa('li', container).forEach(suppressHighlightTemporarily);
-    } else {
-    const item = actionEl.closest('li');
-    if (item) suppressHighlightTemporarily(item);
-    }
-
-    scheduleNotificationRefresh();
-    setTimeout(() => scheduleNotificationRefresh(), 600);
-    };
-
-    const ensureMarkReadHandler = () => {
-    if (!betterNotificationHighlight) return;
-    if (this._notificationMarkReadHandler) return;
-    this._notificationMarkReadHandler = handleMarkReadClick;
-    document.addEventListener('click', this._notificationMarkReadHandler, true);
-    };
-
-    processNotifications = () => {
-    const noticeContainer = Utils.qs(listSelector);
-    if (!noticeContainer) {
-    LOG.debug('通知容器未找到');
-    return;
-    }
-
-    ensureMarkReadHandler();
-
-    const noticeItems = Utils.qsa<HTMLElement>('li', noticeContainer);
-    if (noticeItems.length === 0) {
-    LOG.debug('未找到通知项');
-    return;
-    }
-
-    if (isProcessingNotifications) return;
-
-    isProcessingNotifications = true;
-    try {
-    let workingItems: HTMLElement[] = noticeItems;
-    let orderChanged = false;
-    if (sortNotificationsByTime) {
-      const sortedItems = noticeItems.slice().sort((a, b) => {
-        const nodeA = Utils.qs(timestampSelector, a);
-        const nodeB = Utils.qs(timestampSelector, b);
-        if (!nodeA || !nodeB) return 0;
-        const dateA = Utils.parseDateFlexible(nodeA.textContent.trim());
-        const dateB = Utils.parseDateFlexible(nodeB.textContent.trim());
-        if (!dateA && !dateB) return 0;
-        if (!dateA) return 1;
-        if (!dateB) return -1;
-        const timeValueA = typeof (dateA as Date).getTime === 'function' ? (dateA as Date).getTime() : Number(dateA);
-        const timeValueB = typeof (dateB as Date).getTime === 'function' ? (dateB as Date).getTime() : Number(dateB);
-        return timeValueB - timeValueA;
-      });
-      const currentOrder = Array.from(noticeContainer.children || []);
-      orderChanged = currentOrder.length !== sortedItems.length
-        || sortedItems.some((item, index) => item !== currentOrder[index]);
-      workingItems = sortedItems;
-    }
-
-    if (betterNotificationHighlight) {
-      // 先移除高亮类，避免我们注入的样式影响下一次可见性判断
-      workingItems.forEach((item) => item.classList.remove('notification-with-dot'));
-      const now = Date.now();
-      workingItems.forEach((item) => {
-        const dot = Utils.qs(dotSelector, item);
-        const hasRedDot = Utils.isVisible(dot);
-        if (!hasRedDot) {
-        delete item.dataset.uepManualSuppressUntil;
-        return;
-        }
-        const suppressUntil = Number(item.dataset.uepManualSuppressUntil || 0);
-        if (Number.isFinite(suppressUntil) && suppressUntil > now) {
-        return;
-        }
-        delete item.dataset.uepManualSuppressUntil;
-        item.classList.add('notification-with-dot');
-      });
-    } else {
-      workingItems.forEach((item) => item.classList.remove('notification-with-dot'));
-    }
-
-    if (orderChanged) {
-      try {
-        const fragment = document.createDocumentFragment();
-        workingItems.forEach((node) => fragment.appendChild(node));
-        noticeContainer.innerHTML = '';
-        noticeContainer.appendChild(fragment);
-      } catch (err) {
-        LOG.warnThrottled('notification-reorder', '通知列表重排失败，使用追加模式:', err);
-        workingItems.forEach((node) => noticeContainer.appendChild(node));
-      }
-    }
-    } finally {
-    isProcessingNotifications = false;
-    }
-    };
-
-    const observeNotificationList = (list) => {
-    if (!list) return;
-    const liveObserverOpts = { childList: true, subtree: true, attributes: true };
-    const liveObserver = new MutationObserver(() => {
-    if (isProcessingNotifications) return;
-    scheduleNotificationRefresh();
-    });
-    liveObserver.observe(list, liveObserverOpts);
-    this.observers.add(liveObserver);
-    };
-
-    const ensureListObserver = () => {
-    if (hasInitializedListObserver) return;
-    const list = Utils.qs(listSelector);
-    if (list) {
-    observeNotificationList(list);
-    hasInitializedListObserver = true;
-    scheduleNotificationRefresh();
-    return;
-    }
-    Utils.wait(() => Utils.qs(listSelector), {
-    timeout: 5000,
-    observerOptions: { childList: true, subtree: true }
-    }).then(node => {
-    if (hasInitializedListObserver) return;
-    if (node) {
-      observeNotificationList(node);
-      hasInitializedListObserver = true;
-      scheduleNotificationRefresh();
-    }
-    }).catch(() => {});
-    };
-
-    const startProcessing = () => {
-    processNotifications();
-    ensureListObserver();
-    };
-
-    const setupMaskObserver = (mask) => {
-    if (!mask) {
-    startProcessing();
-    return;
-    }
-    if (mask.style.display === 'none') {
-    startProcessing();
-    return;
-    }
-    const maskObserver = new MutationObserver(() => {
-    if (mask.style.display === 'none') {
-      maskObserver.disconnect();
-      startProcessing();
-    }
-    });
-    maskObserver.observe(mask, { attributes: true, attributeFilter: ['style'] });
-    this.observers.add(maskObserver);
-    setTimeout(() => maskObserver.disconnect(), 10000);
-    };
-
-    const loadingMask = Utils.qs(loadingMaskSelector);
-    if (loadingMask) {
-    setupMaskObserver(loadingMask);
-    } else {
-    Utils.wait(() => Utils.qs(loadingMaskSelector), {
-    timeout: 5000,
-    observerOptions: { childList: true, subtree: true }
-    }).then(mask => setupMaskObserver(mask)).catch(() => startProcessing());
-    }
-
-    // 若不存在加载遮罩或已完成初始化，确保至少运行一次
-    startProcessing();
-  }
-
-  // ===== 统一作业视图 =====
-
-  buildCourseHints(assignments) {
-    const hints = {};
-    (assignments || []).forEach(assignment => {
-    if (!assignment || !assignment.activityId) return;
-    const hint = {};
-    const siteId = assignment.siteId ?? assignment.courseId ?? assignment.courseInfo?.siteId;
-    if (siteId !== undefined && siteId !== null && siteId !== '') {
-    hint.siteId = siteId;
-    }
-    const siteName = assignment.siteName
-    || assignment.courseInfo?.name
-    || assignment.courseName;
-    if (siteName) hint.siteName = siteName;
-    const teachers = assignment.courseInfo?.teachers
-    || assignment.teachers
-    || assignment.teacherName;
-    if (teachers) hint.teachers = teachers;
-    if (Object.keys(hint).length) {
-    hints[assignment.activityId] = hint;
-    }
-    });
-    return hints;
-  }
-
-  async createUnifiedHomeworkView(assignments) {
-    const hostSection = await this.resolveHomeworkHost();
-    if (!hostSection) {
-    LOG.warn('未找到作业面板的挂载容器');
-    this.showHomeworkError('作业区域未准备好，请稍后再试');
-    return;
-    }
-
-    try {
-    // 调试：打印完整的assignments数据
-    UEP_LOG('Complete assignments data:', assignments);
-    UEP_LOG('First assignment structure:', assignments[0]);
-
-    // 过滤掉已删除的作业
-    const filteredAssignments = assignments.filter(assignment =>
-    !Storage.isHomeworkDeleted(assignment.activityId)
-    );
-
-    const initialCourseInfos = {};
-    filteredAssignments.forEach(assignment => {
-    const key = assignment.activityId;
-    if (key === undefined || key === null || key === '') return;
-    if (assignment.courseInfo && assignment.courseInfo.name) {
-      initialCourseInfos[key] = assignment.courseInfo;
-      return;
-    }
-    if (assignment.siteName) {
-      initialCourseInfos[key] = {
-        name: assignment.siteName,
-        teachers: ''
-      };
-    }
-    });
-
-    const assignmentsNeedingLookup = filteredAssignments.filter(assignment => {
-    const key = assignment.activityId;
-    if (key === undefined || key === null || key === '') return false;
-    return !initialCourseInfos[key];
-    });
-
-    let courseInfos = { ...initialCourseInfos };
-    if (assignmentsNeedingLookup.length) {
-    const taskIds = Array.from(new Set(
-      assignmentsNeedingLookup
-        .map(item => item.activityId)
-        .filter(id => id !== undefined && id !== null && id !== '')
-        .map(id => String(id))
-    ));
-    if (taskIds.length) {
-      const hints = this.buildCourseHints(assignmentsNeedingLookup);
-      const fetched = await API.searchCourses(taskIds, { hints });
-      if (fetched && typeof fetched === 'object') {
-        courseInfos = { ...fetched, ...courseInfos };
-      }
-    }
-    }
-
-    // 创建统一作业视图
-    this.insertUnifiedHomeworkPanel(filteredAssignments, courseInfos, hostSection);
-    } catch (error) {
-    LOG.error('Create unified homework view error:', error);
-    this.showHomeworkError('作业数据加载失败');
-    }
-  }
-
-  insertUnifiedHomeworkPanel(assignments, courseInfos, hostSection = null) {
-    const existingPanel = document.getElementById('unified-homework-panel');
-    if (existingPanel) {
-    this.refreshUnifiedHomeworkPanel(existingPanel, assignments, courseInfos);
-    return;
-    }
-
-    const targetHost =
-    hostSection instanceof Element
-      ? hostSection
-      : document.querySelector('.in-progress-section') ||
-        document.querySelector('.home-left-container.home-inline-block') ||
-        document.querySelector('.home-left-container');
-
-    if (!targetHost) {
-    LOG.warn('未找到作业面板的挂载位置，放弃渲染统一作业视图');
-    return;
-    }
-
-    // 不再需要保存原始作业项，直接使用URL跳转
-
-    // 创建新的统一视图容器，完全替换原来的section
-    const enableTrash = isHomeworkTrashEnabled();
-    const trashButtonHtml = enableTrash
-      ? `
-      <div class="trash-bin-info" id="trash-bin-btn" title="查看回收站">
-        ${SVG_ICONS.trashCan}
-        <span id="trash-count">回收站</span>
-      </div>`
-      : '';
-
-    const unifiedPanel = document.createElement('div');
-    unifiedPanel.id = 'unified-homework-panel';
-    unifiedPanel.className = 'unified-homework-container';
-    unifiedPanel.innerHTML = `
-    <div class="unified-homework-header">
-    <div class="title-section">
-      ${SVG_ICONS.homeworkHeading}
-      <h3 class="unified-homework-title">全部待办作业</h3>
-    </div>
-    <div class="unified-homework-actions">
-      <div class="homework-count" id="homework-count">共 ${assignments.length} 项作业</div>
-      ${trashButtonHtml}
-    </div>
-    </div>
-    <div class="search-container">
-    <input type="text" id="homework-search" placeholder="搜索作业标题或课程名称..." />
-    </div>
-    <div class="unified-homework-list"></div>
-    `;
-
-    if (targetHost instanceof Element && targetHost.matches('.in-progress-section') && targetHost.parentNode) {
-    targetHost.parentNode.replaceChild(unifiedPanel, targetHost);
-    } else if (targetHost instanceof HTMLElement) {
-    targetHost.insertAdjacentElement('afterbegin', unifiedPanel);
-    } else if (targetHost.parentNode) {
-    targetHost.parentNode.insertBefore(unifiedPanel, targetHost);
-    } else {
-    document.body.appendChild(unifiedPanel);
-    }
-
-    // 添加样式
-    this.addUnifiedHomeworkStyles();
-    this.populateHomeworkList(unifiedPanel.querySelector('.unified-homework-list'), assignments, courseInfos);
-
-    // 等待DOM渲染完成后绑定事件（事件委托减少监听器数量）
-    setTimeout(() => {
-    const listRoot = unifiedPanel.querySelector('.unified-homework-list') || unifiedPanel;
-    listRoot.addEventListener('click', (event) => {
-    const delBtn = event.target.closest('.homework-delete-btn');
-    if (delBtn) {
-      event.preventDefault();
-      event.stopPropagation();
-      const assignmentId = delBtn.getAttribute('data-assignment-id');
-      const card = delBtn.closest('.unified-homework-card');
-      if (!card) return;
-      const title = card.querySelector('.homework-title')?.textContent || '';
-      this.confirmDeleteHomework(title, () => {
-        const assignmentData = assignments.find(a => String(a.activityId) === String(assignmentId));
-        Storage.addDeletedHomework(assignmentId, assignmentData);
-        card.remove();
-        const remaining = unifiedPanel.querySelectorAll('.unified-homework-card').length;
-        const countElement = unifiedPanel.querySelector('#homework-count');
-        if (countElement) countElement.textContent = `共 ${remaining} 项作业`;
-        const trashCountSpan = unifiedPanel.querySelector('#trash-count');
-        const trashBinBtn = unifiedPanel.querySelector('#trash-bin-btn');
-        if (trashCountSpan && trashBinBtn) {
-        const dcount = Storage.getDeletedHomeworks().length;
-        trashCountSpan.textContent = dcount > 0 ? `回收站 (${dcount})` : '回收站';
-        trashBinBtn.classList.toggle('has-items', dcount > 0);
-        }
-        NotificationManager.show('已移除', `作业"${title}"已移入回收站`);
-      });
-      return;
-    }
-    const card = event.target.closest('.unified-homework-card');
-    if (card) {
-      event.preventDefault();
-      event.stopPropagation();
-      const assignmentId = card.getAttribute('data-assignment-id');
-      const title = card.getAttribute('data-assignment-title');
-      const type = card.getAttribute('data-assignment-type') || 'assignment';
-      LOG.debug('Card clicked:', { assignmentId, title, type });
-      if (assignmentId && title) this.openAssignmentDetails(assignmentId, title, type);
-    }
-    });
-
-    // 添加搜索功能
-    const searchInput = unifiedPanel.querySelector('#homework-search');
-    const updateHomeworkCount = (count) => {
-    const countElement = unifiedPanel.querySelector('#homework-count');
-    if (countElement) {
-      countElement.textContent = `共 ${count} 项作业`;
-    }
-    };
-
-    if (searchInput) {
-    const onHomeworkSearch = Utils.debounce(() => {
-      const searchTerm = searchInput.value.toLowerCase();
-      const homeworkCards = unifiedPanel.querySelectorAll('.unified-homework-card');
-
-      let visibleCount = 0;
-      homeworkCards.forEach(card => {
-        const title = card.querySelector('.homework-title').textContent.toLowerCase();
-        const course = card.querySelector('.homework-course span').textContent.toLowerCase();
-
-        if (title.includes(searchTerm) || course.includes(searchTerm)) {
-        card.style.display = 'flex';
-        visibleCount++;
-        } else {
-        card.style.display = 'none';
-        }
-      });
-
-      updateHomeworkCount(visibleCount);
-    }, 150);
-    searchInput.addEventListener('input', onHomeworkSearch);
-    }
-
-    // 更新回收站计数并绑定事件
-    const trashBinBtn = unifiedPanel.querySelector('#trash-bin-btn');
-    const trashCountSpan = unifiedPanel.querySelector('#trash-count');
-    if (trashBinBtn && trashCountSpan) {
-    const deletedCount = Storage.getDeletedHomeworks().length;
-    trashCountSpan.textContent = deletedCount > 0 ? `回收站 (${deletedCount})` : '回收站';
-
-    // 根据是否有内容添加样式类
-    if (deletedCount > 0) {
-      trashBinBtn.classList.add('has-items');
-    } else {
-      trashBinBtn.classList.remove('has-items');
-    }
-
-    trashBinBtn.addEventListener('click', () => {
-      this.showTrashBin();
-    });
-    }
-    }, 100);
-  }
-
-  refreshUnifiedHomeworkPanel(panel, assignments, courseInfos) {
-    if (!panel) return;
-    const listElement = panel.querySelector('.unified-homework-list');
-    if (listElement) {
-    this.populateHomeworkList(listElement, assignments, courseInfos);
-    }
-    const countElement = panel.querySelector('#homework-count');
-    if (countElement) {
-    countElement.textContent = `共 ${assignments.length} 项作业`;
-    }
-    const trashBinBtn = panel.querySelector('#trash-bin-btn');
-    const trashCountSpan = panel.querySelector('#trash-count');
-    if (trashBinBtn && trashCountSpan) {
-    const deletedCount = Storage.getDeletedHomeworks().length;
-    trashCountSpan.textContent = deletedCount > 0 ? `回收站 (${deletedCount})` : '回收站';
-    trashBinBtn.classList.toggle('has-items', deletedCount > 0);
-    }
-    const searchInput = panel.querySelector('#homework-search');
-    if (searchInput) {
-    // 触发一次搜索以应用当前过滤条件
-    const evt = new Event('input', { bubbles: true });
-    searchInput.dispatchEvent(evt);
-    }
-  }
-
-  buildHomeworkCard(assignment, courseInfo, index = 0) {
-    if (!assignment) return null;
-
-    const isExercise = assignment.type === 4;
-    const activityType = isExercise ? 'exercise' : 'assignment';
-    const title = assignment.title || assignment.activityName || `${isExercise ? '练习' : '作业'} ${index + 1}`;
-    const courseName = assignment.siteName
-    ? assignment.siteName
-    : (courseInfo && courseInfo.name ? courseInfo.name : '课程信息加载中...');
-    const teacherName = courseInfo?.teachers || '';
-
-    let deadlineDisplay = '无期限';
-    if (assignment.endTime) {
-    try {
-    if (typeof assignment.endTime === 'string' && assignment.endTime.includes('-')) {
-      const parts = assignment.endTime.split(' ');
-      if (parts.length >= 2) {
-        const datePart = parts[0].split('-').slice(1).join('-');
-        const timePart = parts[1].split(':').slice(0, 2).join(':');
-        deadlineDisplay = `${datePart} ${timePart}`;
-      } else {
-        deadlineDisplay = assignment.endTime.split(' ')[0];
-      }
-    } else {
-      const date = Utils.parseDateFlexible(assignment.endTime);
-      if (date) {
-        deadlineDisplay = date.toLocaleString('zh-CN', {
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit'
-        });
-      } else {
-        deadlineDisplay = '时间格式错误';
-      }
-    }
-    } catch (_) {
-    deadlineDisplay = '时间格式错误';
-    }
-    }
-
-    let statusClass = 'normal';
-    let statusText = '正常';
-    if (assignment.endTime) {
-    try {
-    const endDate = Utils.parseDateFlexible(assignment.endTime);
-    if (endDate) {
-      const now = new Date();
-      const diff = endDate - now;
-      if (diff < 0) {
-        statusClass = 'overdue';
-        statusText = '已逾期';
-      } else if (diff < 72 * 60 * 60 * 1000) {
-        statusClass = 'urgent';
-        statusText = '即将到期';
-      }
-    }
-    } catch (_) { /* ignore */ }
-    }
-
-    const typeLabel = isExercise ? '练习' : '作业';
-
-    const card = document.createElement('div');
-    card.className = `unified-homework-card ${statusClass}`;
-    card.dataset.assignmentId = String(assignment.activityId ?? '');
-    card.dataset.assignmentTitle = title;
-    card.dataset.assignmentType = activityType;
-
-    const info = document.createElement('div');
-    info.className = 'homework-info';
-
-    const titleElem = document.createElement('h4');
-    titleElem.className = 'homework-title';
-    titleElem.textContent = title;
-    titleElem.title = title;
-    info.appendChild(titleElem);
-
-    const courseRow = document.createElement('div');
-    courseRow.className = 'homework-course';
-    courseRow.innerHTML = `${SVG_ICONS.homeworkCourse}<span></span>`;
-    const courseSpan = courseRow.querySelector('span');
-    if (courseSpan) courseSpan.textContent = courseName;
-    info.appendChild(courseRow);
-
-    if (teacherName) {
-    const teacherRow = document.createElement('div');
-    teacherRow.className = 'homework-teacher';
-    teacherRow.innerHTML = `${SVG_ICONS.homeworkTeacher}<span></span>`;
-    const teacherSpan = teacherRow.querySelector('span');
-    if (teacherSpan) teacherSpan.textContent = teacherName;
-    info.appendChild(teacherRow);
-    }
-
-    const deadlineRow = document.createElement('div');
-    deadlineRow.className = 'homework-deadline';
-    deadlineRow.innerHTML = `${SVG_ICONS.homeworkClock}<span></span>`;
-    const deadlineSpan = deadlineRow.querySelector('span');
-    if (deadlineSpan) deadlineSpan.textContent = deadlineDisplay;
-    info.appendChild(deadlineRow);
-
-    card.appendChild(info);
-
-    const badge = document.createElement('div');
-    badge.className = `homework-status-badge ${statusClass}`;
-    badge.textContent = `${typeLabel} - ${statusText}`;
-    card.appendChild(badge);
-
-    if (isHomeworkTrashEnabled()) {
-      const deleteBtn = document.createElement('button');
-      deleteBtn.className = 'homework-delete-btn';
-      deleteBtn.dataset.assignmentId = String(assignment.activityId ?? '');
-      deleteBtn.title = '移除作业';
-      deleteBtn.innerHTML = SVG_ICONS.homeworkDelete;
-      card.appendChild(deleteBtn);
-    }
-
-    return card;
-  }
-
-  populateHomeworkList(container, assignments, courseInfos) {
-    if (!container) return;
-    container.innerHTML = '';
-    const fragment = document.createDocumentFragment();
-    assignments.forEach((assignment, index) => {
-    const courseInfo = courseInfos?.[assignment.activityId];
-    const card = this.buildHomeworkCard(assignment, courseInfo, index);
-    if (card) fragment.appendChild(card);
-    });
-    container.appendChild(fragment);
-  }
-
-  addUnifiedHomeworkStyles() {
-    if (this._homeworkStylesInjected) return;
-    GM_addStyle(`
-    .unified-homework-container {
-    background: #ffffff;
-    border-radius: 8px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
-    border: 1px solid #ebeef5;
-    margin: 24px auto 0;
-    padding: 0;
-    max-width: 1200px;
-    transition: all 0.3s ease;
-    position: relative;
-    overflow: hidden;
-    }
-
-
-
-    .unified-homework-header {
-    background: #fff;
-    color: #303133;
-    padding: 20px 24px 16px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border-bottom: 1px solid #ebeef5;
-    }
-
-    .title-section {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    }
-
-        .unified-homework-title {
-    margin: 0;
-    font-size: 18px;
-    font-weight: 700;
-    color: #303133;
-    letter-spacing: -0.02em;
-    }
-
-    .unified-homework-actions {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    }
-
-    .trash-bin-info {
-    font-size: 14px;
-    color: #909399;
-    background-color: #f5f7fa;
-    padding: 4px 10px;
-    border-radius: 4px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    transition: all 0.3s;
-    user-select: none;
-    }
-
-    .trash-bin-info:hover {
-    background-color: #e4e7ed;
-    color: #606266;
-    }
-
-    .trash-bin-info.has-items {
-    color: #67c23a;
-    background-color: #f0f9ff;
-    }
-
-    .trash-bin-info.has-items:hover {
-    background-color: #e1f5fe;
-    color: #5ba832;
-    }
-
-    .homework-count {
-    font-size: 14px;
-    color: #909399;
-    background-color: #f5f7fa;
-    padding: 4px 10px;
-    border-radius: 4px;
-    }
-
-    .homework-count,
-    .trash-bin-info {
-    font-weight: 500;
-    letter-spacing: 0.02em;
-    }
-
-    .search-container {
-    padding: 16px 24px;
-    }
-
-    .search-container input {
-    width: 100%;
-    padding: 10px 15px;
-    border: 1px solid #dcdfe6;
-    border-radius: 4px;
-    font-size: 14px;
-    color: #606266;
-    box-sizing: border-box;
-    transition: all 0.3s;
-    outline: none;
-    }
-
-    .search-container input:focus {
-    border-color: #409EFF;
-    box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.2);
-    }
-
-    .unified-homework-list {
-    max-height: 70vh;
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding: 12px 20px 24px;
-    background: transparent;
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 20px;
-    justify-content: center;
-    }
-
-    .unified-homework-card {
-    height: auto;
-    padding: 16px;
-    background-color: #ffffff;
-    border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-    margin: 0;
-    transition: all 0.3s;
-    display: flex;
-    flex-direction: column;
-    border: 1px solid #ebeef5;
-    position: relative;
-    overflow: hidden;
-    cursor: pointer;
-    }
-
-    .unified-homework-card:hover {
-    background-color: #f9fafc;
-    box-shadow: 0 6px 16px rgba(0,0,0,0.1);
-    transform: translateY(-2px);
-    }
-
-    .unified-homework-card.urgent {
-    border-left: 4px solid #ffe6b3;
-    background-color: #ffffff;
-    }
-
-    .unified-homework-card.overdue {
-    border-left: 4px solid #ffd6d6;
-    background-color: #ffffff;
-    }
-
-    .homework-info {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    }
-
-    .homework-title {
-    margin: 0 0 12px 0;
-    font-size: 15px;
-    font-weight: 600;
-    color: #303133;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    display: block;
-    width: 100%;
-    line-height: 1.4;
-    padding-right: 70px;
-    max-width: 100%;
-    }
-
-    .homework-course,
-    .homework-teacher,
-    .homework-deadline {
-    font-size: 13px;
-    color: #606266;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-weight: 400;
-    }
-
-    .homework-course svg,
-    .homework-teacher svg,
-    .homework-deadline svg {
-    flex-shrink: 0;
-    opacity: 0.7;
-    }
-
-    .homework-status-badge {
-    position: absolute;
-    top: 12px;
-    right: 12px;
-    font-size: 11px;
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 12px;
-    background: #f5f7fa;
-    color: #909399;
-    }
-
-    .homework-status-badge.urgent {
-    background: #fff7e6;
-    color: #b26a00;
-    border: none;
-    }
-
-    .homework-status-badge.overdue {
-    background: #fff0f0;
-    color: #c0392b;
-    border: none;
-    }
-
-    .homework-delete-btn {
-    position: absolute;
-    bottom: 8px;
-    right: 8px;
-    background: rgba(255, 255, 255, 0.9);
-    border: 1px solid #dcdfe6;
-    border-radius: 50%;
-    width: 24px;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    opacity: 0;
-    transition: all 0.3s;
-    color: #909399;
-    z-index: 10;
-    }
-
-    .unified-homework-card:hover .homework-delete-btn {
-    opacity: 1;
-    }
-
-    .homework-delete-btn:hover {
-    background: #f56c6c;
-    color: white;
-    border-color: #f56c6c;
-    }
-
-
-
-    /* 现代化滚动条样式 */
-    .unified-homework-list::-webkit-scrollbar {
-    width: 8px;
-    }
-
-    .unified-homework-list::-webkit-scrollbar-track {
-    background: rgba(245, 247, 250, 0.3);
-    border-radius: 10px;
-    margin: 16px 0;
-    }
-
-    .unified-homework-list::-webkit-scrollbar-thumb {
-    background: linear-gradient(135deg, rgba(64, 158, 255, 0.3) 0%, rgba(64, 158, 255, 0.2) 100%);
-    border-radius: 10px;
-    border: 2px solid transparent;
-    background-clip: content-box;
-    transition: all 0.3s ease;
-    }
-
-    .unified-homework-list::-webkit-scrollbar-thumb:hover {
-    background: linear-gradient(135deg, rgba(64, 158, 255, 0.5) 0%, rgba(64, 158, 255, 0.3) 100%);
-    border-radius: 10px;
-    }
-
-    /* 为Firefox添加现代滚动条 */
-    .unified-homework-list {
-    scrollbar-width: thin;
-    scrollbar-color: rgba(64, 158, 255, 0.3) rgba(245, 247, 250, 0.3);
-    }
-
-    /* 添加一些微动画 */
-    @keyframes fadeInUp {
-    from {
-      opacity: 0;
-      transform: translateY(20px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-    }
-
-    .unified-homework-card {
-    animation: fadeInUp 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
-    }
-
-    .unified-homework-card:nth-child(1) { animation-delay: 0.1s; }
-    .unified-homework-card:nth-child(2) { animation-delay: 0.15s; }
-    .unified-homework-card:nth-child(3) { animation-delay: 0.2s; }
-    .unified-homework-card:nth-child(4) { animation-delay: 0.25s; }
-    .unified-homework-card:nth-child(5) { animation-delay: 0.3s; }
-    .unified-homework-card:nth-child(n+6) { animation-delay: 0.35s; }
-    `);
-    this._homeworkStylesInjected = true;
-  }
-
-  addHomeworkSkeletonStyles() {
-    if (this._homeworkSkeletonStylesInjected) return;
-    GM_addStyle(`
-    .unified-homework-container.is-skeleton .unified-homework-actions,
-    .unified-homework-container.is-skeleton .search-container {
-      opacity: 0.6;
-    }
-
-    .homework-skeleton-card {
-      position: relative;
-      overflow: hidden;
-      background: #f5f7fa;
-      border: 1px solid #ebeef5;
-      border-radius: 8px;
-      padding: 16px;
-      min-height: 110px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    .homework-skeleton-line {
-      height: 12px;
-      border-radius: 999px;
-      background: linear-gradient(90deg, #f0f1f5 25%, #e6e7ec 50%, #f0f1f5 75%);
-      background-size: 200% 100%;
-      animation: skeleton-shimmer 1.4s ease infinite;
-    }
-
-    .homework-skeleton-line.wide {
-      width: 80%;
-    }
-
-    .homework-skeleton-line.medium {
-      width: 60%;
-    }
-
-    .homework-skeleton-line.short {
-      width: 40%;
-    }
-
-    @keyframes skeleton-shimmer {
-      0% { background-position: 200% 0; }
-      100% { background-position: -200% 0; }
-    }
-
-    .homework-error {
-      padding: 32px;
-      text-align: center;
-      color: #909399;
-      font-size: 14px;
-    }
-    `);
-    this._homeworkSkeletonStylesInjected = true;
-  }
-
-  async resolveHomeworkHost() {
-    const selectors = [
-    '.in-progress-section',
-    '.home-left-container.home-inline-block',
-    '.home-left-container',
-    ];
-
-    try {
-    const host = await Utils.wait(() => {
-      for (const selector of selectors) {
-      const element = document.querySelector(selector);
-      if (element) return element;
-      }
-      return null;
-    }, {
-      timeout: 7000,
-      observerOptions: { childList: true, subtree: true },
-      label: 'homework-host',
-      logTimeout: false,
-    });
-    if (host) return host;
-    } catch (error) {
-    LOG.warn('等待作业宿主容器超时，尝试使用降级容器:', error);
-    }
-
-    for (const selector of selectors) {
-    const fallback = document.querySelector(selector);
-    if (fallback) return fallback;
-    }
-    return null;
-  }
-
-  openAssignmentDetails(assignmentId, title, type) {
-    LOG.debug('Opening details:', { assignmentId, title, type });
-
-    // 根据类型决定跳转到哪个页面
-    let url;
-    if (type === 'exercise') {
-    // 练习详情页 - 使用正确的URL格式
-    url = `https://ucloud.bupt.edu.cn/uclass/course.html#/answer?id=${assignmentId}`;
-    } else {
-    // 作业详情页
-    url = `https://ucloud.bupt.edu.cn/uclass/course.html#/student/assignmentDetails_fullpage?assignmentId=${assignmentId}&assignmentTitle=${encodeURIComponent(title)}`;
-    }
-
-    LOG.debug('Navigating to:', url);
-
-    // 在当前页面跳转，模拟原始行为
-    window.location.href = url;
-  }
-
-  // 确认删除作业
-  confirmDeleteHomework(title, callback) {
-    // 检查是否设置了不再提示
-    if (Settings.get('home', 'noConfirmDelete')) {
-    callback();
-    return;
-    }
-
-    // 创建自定义确认对话框
-    const modal = document.createElement('div');
-    modal.className = 'delete-confirm-modal';
-    modal.innerHTML = `
-    <div class="delete-confirm-overlay"></div>
-    <div class="delete-confirm-content">
-    <div class="delete-confirm-header">
-      <h3>移除作业</h3>
-    </div>
-    <div class="delete-confirm-body">
-      <p>确定要将作业"<strong>${title}</strong>"移入回收站吗？</p>
-      <div class="delete-confirm-options">
-        <label class="delete-confirm-checkbox">
-        <input type="checkbox" id="no-confirm-checkbox">
-        <span>不再提示此确认</span>
-        </label>
-      </div>
-    </div>
-    <div class="delete-confirm-actions">
-      <button class="cancel-delete-btn">取消</button>
-      <button class="confirm-delete-btn">移入回收站</button>
-    </div>
-    </div>
-    `;
-
-    document.body.appendChild(modal);
-    this.addDeleteConfirmStyles();
-
-    // 绑定事件
-    this.bindDeleteConfirmEvents(modal, callback);
-
-    // 显示动画
-    setTimeout(() => {
-    modal.classList.add('visible');
-    }, 10);
-  }
-
-  addDeleteConfirmStyles() {
-    if (document.getElementById('delete-confirm-styles')) return;
-
-    const styles = document.createElement('style');
-    styles.id = 'delete-confirm-styles';
-    styles.textContent = `
-    .delete-confirm-modal {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    z-index: 10001;
-    opacity: 0;
-    transition: opacity 0.3s ease;
-    }
-
-    .delete-confirm-modal.visible {
-    opacity: 1;
-    }
-
-    .delete-confirm-overlay {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.5);
-    cursor: pointer;
-    }
-
-    .delete-confirm-content {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    background: white;
-    border-radius: 12px;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-    width: 400px;
-    max-width: 90vw;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    }
-
-    .delete-confirm-header {
-    padding: 20px 24px 16px;
-    border-bottom: 1px solid #ebeef5;
-    background: #fafbfc;
-    }
-
-    .delete-confirm-header h3 {
-    margin: 0;
-    font-size: 18px;
-    color: #303133;
-    }
-
-    .delete-confirm-body {
-    padding: 20px 24px;
-    background: white;
-    }
-
-    .delete-confirm-body p {
-    margin: 0 0 16px 0;
-    font-size: 14px;
-    color: #606266;
-    line-height: 1.5;
-    }
-
-    .delete-confirm-options {
-    margin-top: 16px;
-    }
-
-    .delete-confirm-checkbox {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: #909399;
-    cursor: pointer;
-    user-select: none;
-    }
-
-    .delete-confirm-checkbox input[type="checkbox"] {
-    margin: 0;
-    cursor: pointer;
-    }
-
-    .delete-confirm-actions {
-    padding: 16px 24px 20px;
-    border-top: 1px solid #ebeef5;
-    display: flex;
-    gap: 12px;
-    justify-content: flex-end;
-    background: #fafbfc;
-    }
-
-    .cancel-delete-btn, .confirm-delete-btn {
-    border: none;
-    padding: 8px 16px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 14px;
-    font-weight: 500;
-    transition: all 0.3s;
-    outline: none;
-    }
-
-    .cancel-delete-btn {
-    background: #f5f7fa;
-    color: #606266;
-    border: 1px solid #dcdfe6;
-    }
-
-    .cancel-delete-btn:hover {
-    background: #e4e7ed;
-    border-color: #c0c4cc;
-    }
-
-    .confirm-delete-btn {
-    background: #f56c6c;
-    color: white;
-    }
-
-    .confirm-delete-btn:hover {
-    background: #e55353;
-    }
-    `;
-    document.head.appendChild(styles);
-  }
-
-  bindDeleteConfirmEvents(modal, callback) {
-    const closeModal = () => {
-    modal.classList.remove('visible');
-    setTimeout(() => {
-    if (modal.parentNode) {
-      modal.parentNode.removeChild(modal);
-    }
-    }, 300);
-    };
-
-    // 点击遮罩层关闭
-    modal.querySelector('.delete-confirm-overlay').addEventListener('click', closeModal);
-
-    // 取消按钮
-    modal.querySelector('.cancel-delete-btn').addEventListener('click', closeModal);
-
-    // 确认按钮
-    modal.querySelector('.confirm-delete-btn').addEventListener('click', () => {
-    const noConfirmCheckbox = modal.querySelector('#no-confirm-checkbox');
-
-    // 如果选中了"不再提示"，保存设置
-    if (noConfirmCheckbox.checked) {
-    Settings.set('home', 'noConfirmDelete', true);
-    NotificationManager.show('设置已保存', '今后删除作业将不再显示确认提示');
-    }
-
-    closeModal();
-    callback();
-    });
-
-    // ESC键关闭
-    const handleKeyPress = (e) => {
-    if (e.key === 'Escape') {
-    closeModal();
-    document.removeEventListener('keydown', handleKeyPress);
-    }
-    };
-    document.addEventListener('keydown', handleKeyPress);
-  }
-
-  // 显示回收站
-  showTrashBin() {
-    const deletedHomeworks = Storage.getDeletedHomeworks();
-
-    // 创建回收站模态框
-    const modal = document.createElement('div');
-    modal.className = 'trash-bin-modal';
-    modal.innerHTML = `
-    <div class="trash-bin-overlay"></div>
-    <div class="trash-bin-content">
-    <div class="trash-bin-header">
-      <h3>作业回收站</h3>
-      <div class="trash-bin-actions">
-        <button class="clear-all-btn" ${deletedHomeworks.length === 0 ? 'disabled' : ''}>清空回收站 (${deletedHomeworks.length})</button>
-        <button class="close-trash-btn">×</button>
-      </div>
-    </div>
-    <div class="trash-bin-body">
-      ${this.generateTrashBinHTML(deletedHomeworks)}
-    </div>
-    </div>
-    `;
-
-    document.body.appendChild(modal);
-    this.addTrashBinStyles();
-
-    // 绑定事件
-    this.bindTrashBinEvents(modal, deletedHomeworks);
-
-    // 显示动画
-    setTimeout(() => {
-    modal.classList.add('visible');
-    }, 10);
-  }
-
-  updateTrashBinSummary() {
-    try {
-    const panel = document.getElementById('unified-homework-panel');
-    if (!panel) return;
-    const trashCountSpan = panel.querySelector('#trash-count');
-    const trashBinBtn = panel.querySelector('#trash-bin-btn');
-    const deletedCount = Storage.getDeletedHomeworks().length;
-    if (trashCountSpan) {
-    trashCountSpan.textContent = deletedCount > 0 ? `回收站 (${deletedCount})` : '回收站';
-    }
-    if (trashBinBtn) {
-    trashBinBtn.classList.toggle('has-items', deletedCount > 0);
-    }
-    } catch (e) {
-    LOG.warn('更新回收站状态失败:', e);
-    }
-  }
-
-  generateTrashBinHTML(deletedHomeworks) {
-    if (deletedHomeworks.length === 0) {
-    return '<div class="empty-trash">回收站为空<br><small>删除的作业会暂时保存在这里</small></div>';
-    }
-
-    return deletedHomeworks.map(item => {
-    const assignment = item.data;
-    const deletedDate = new Date(item.deletedAt).toLocaleString('zh-CN');
-    const title = assignment.title || assignment.activityName || '未知作业';
-    const isExercise = assignment.type === 4;
-    const typeLabel = isExercise ? '练习' : '作业';
-
-    return `
-    <div class="trash-item" data-assignment-id="${item.id}">
-      <div class="trash-item-info">
-        <h4 class="trash-item-title">${title}</h4>
-        <div class="trash-item-meta">
-        <span class="trash-item-type">${typeLabel}</span>
-        <span class="trash-item-date">删除时间: ${deletedDate}</span>
-        </div>
-      </div>
-      <div class="trash-item-actions">
-        <button class="restore-btn" data-assignment-id="${item.id}" title="恢复">
-        ${SVG_ICONS.trashRestore}
-        恢复
-        </button>
-        <button class="permanent-delete-btn" data-assignment-id="${item.id}" title="永久删除">
-        ${SVG_ICONS.trashDelete}
-        </button>
-      </div>
-    </div>
-    `;
-    }).join('');
-  }
-
-  addTrashBinStyles() {
-    if (document.getElementById('trash-bin-styles')) return;
-
-    const styles = document.createElement('style');
-    styles.id = 'trash-bin-styles';
-    styles.textContent = `
-    .trash-bin-modal {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    z-index: 10000;
-    opacity: 0;
-    transition: opacity 0.3s ease;
-    }
-
-    .trash-bin-modal.visible {
-    opacity: 1;
-    }
-
-    .trash-bin-overlay {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.5);
-    cursor: pointer;
-    }
-
-    .trash-bin-content {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    background: white;
-    border-radius: 12px;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-    width: 600px;
-    max-width: 90vw;
-    max-height: 80vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    }
-
-    .trash-bin-header {
-    padding: 20px 24px 16px;
-    border-bottom: 1px solid #ebeef5;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    background: #fafbfc;
-    }
-
-    .trash-bin-header h3 {
-    margin: 0;
-    font-size: 18px;
-    color: #303133;
-    }
-
-    .trash-bin-actions {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    }
-
-    .clear-all-btn {
-    background: #f56c6c;
-    color: white;
-    border: none;
-    padding: 6px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-    transition: all 0.3s;
-    }
-
-    .clear-all-btn:hover:not(:disabled) {
-    background: #e55353;
-    }
-
-    .clear-all-btn:disabled {
-    background: #c0c4cc;
-    cursor: not-allowed;
-    }
-
-    .close-trash-btn {
-    background: none;
-    border: none;
-    font-size: 24px;
-    color: #909399;
-    cursor: pointer;
-    padding: 0;
-    width: 30px;
-    height: 30px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 50%;
-    transition: all 0.3s;
-    }
-
-    .close-trash-btn:hover {
-    background: #f0f0f0;
-    color: #606266;
-    }
-
-    .trash-bin-body {
-    padding: 16px 24px 24px;
-    overflow-y: auto;
-    flex: 1;
-    background: white;
-    }
-
-    .empty-trash {
-    text-align: center;
-    color: #909399;
-    padding: 40px;
-    font-size: 16px;
-    }
-
-    .trash-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 12px 16px;
-    border: 1px solid #ebeef5;
-    border-radius: 8px;
-    margin-bottom: 12px;
-    background: #fafbfc;
-    transition: all 0.3s;
-    }
-
-    .trash-item:hover {
-    background: #f0f2f5;
-    border-color: #c0c4cc;
-    }
-
-    .trash-item-info {
-    flex: 1;
-    }
-
-    .trash-item-title {
-    margin: 0 0 6px 0;
-    font-size: 14px;
-    font-weight: 600;
-    color: #303133;
-    }
-
-    .trash-item-meta {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    font-size: 12px;
-    color: #909399;
-    }
-
-    .trash-item-type {
-    background: #e4e7ed;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-weight: 500;
-    }
-
-    .trash-item-actions {
-    display: flex;
-    gap: 8px;
-    }
-
-    .restore-btn, .permanent-delete-btn {
-    border: none;
-    padding: 6px 10px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    transition: all 0.3s;
-    }
-
-    .restore-btn {
-    background: #67c23a;
-    color: white;
-    }
-
-    .restore-btn:hover {
-    background: #5ba832;
-    }
-
-    .permanent-delete-btn {
-    background: #f56c6c;
-    color: white;
-    }
-
-    .permanent-delete-btn:hover {
-    background: #e55353;
-    }
-    `;
-    document.head.appendChild(styles);
-  }
-
-  bindTrashBinEvents(modal, deletedHomeworks) {
-    // 关闭模态框
-    const closeModal = () => {
-    modal.classList.remove('visible');
-    setTimeout(() => {
-    if (modal.parentNode) {
-      modal.parentNode.removeChild(modal);
-    }
-    }, 300);
-    };
-
-    // 点击遮罩层关闭
-    modal.querySelector('.trash-bin-overlay').addEventListener('click', closeModal);
-
-    // 点击关闭按钮
-    modal.querySelector('.close-trash-btn').addEventListener('click', closeModal);
-
-    // ESC键关闭
-    const handleKeyPress = (e) => {
-    if (e.key === 'Escape') {
-    closeModal();
-    document.removeEventListener('keydown', handleKeyPress);
-    }
-    };
-    document.addEventListener('keydown', handleKeyPress);
-
-    // 清空回收站
-    const clearAllBtn = modal.querySelector('.clear-all-btn');
-    if (clearAllBtn) {
-    clearAllBtn.addEventListener('click', () => {
-    if (confirm('确定要清空回收站吗？此操作不可恢复！')) {
-      Storage.clearDeletedHomeworks();
-      this.updateTrashBinSummary();
-      NotificationManager.show('已清空', '回收站已清空');
-      closeModal();
-    }
-    });
-    }
-
-    // 恢复作业
-    modal.querySelectorAll('.restore-btn').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-    const assignmentId = btn.getAttribute('data-assignment-id');
-    const trashItem = btn.closest('.trash-item');
-    const title = trashItem.querySelector('.trash-item-title').textContent;
-
-    Storage.removeDeletedHomework(assignmentId);
-    trashItem.remove();
-
-    // 同步更新统一作业面板，恢复的作业立即显示
-    try {
-      const panel = document.getElementById('unified-homework-panel');
-      const list = panel ? panel.querySelector('.unified-homework-list') : null;
-      // 从回收站快照或存储中找回数据
-      let item = (Array.isArray(deletedHomeworks) ? deletedHomeworks : []).find(i => String(i.id) === String(assignmentId));
-      if (!item) {
-        const latest = Storage.getDeletedHomeworks();
-        item = latest.find(i => String(i.id) === String(assignmentId));
-      }
-      if (panel && list && item && item.data) {
-        const assign = item.data;
-        let courseInfos = {};
-        try {
-        courseInfos = await API.searchCourses([assign.activityId], { hints: this.buildCourseHints([assign]) });
-        } catch (err) { LOG.warn('获取课程信息失败:', err); }
-        const card = this.buildHomeworkCard(assign, courseInfos?.[assign.activityId], list.childElementCount);
-        if (card) {
-        list.insertAdjacentElement('afterbegin', card);
-        const countEl = panel.querySelector('#homework-count');
-        if (countEl) countEl.textContent = `共 ${panel.querySelectorAll('.unified-homework-card').length} 项作业`;
-        }
-      }
-    } catch (err) { LOG.warn('恢复后更新统一作业面板失败:', err); }
-
-    NotificationManager.show('已恢复', `作业"${title}"已恢复`);
-
-    // 更新按钮数量显示和状态
-    const remainingItems = modal.querySelectorAll('.trash-item');
-    const clearBtn = modal.querySelector('.clear-all-btn');
-    clearBtn.textContent = `清空回收站 (${remainingItems.length})`;
-
-    if (remainingItems.length === 0) {
-      modal.querySelector('.trash-bin-body').innerHTML = '<div class="empty-trash">回收站为空<br><small>删除的作业会暂时保存在这里</small></div>';
-      clearBtn.disabled = true;
-    }
-
-    // 同步更新统一面板回收站计数
-    try {
-      const unifiedPanel = document.getElementById('unified-homework-panel');
-      if (unifiedPanel) {
-        const trashCountSpan = unifiedPanel.querySelector('#trash-count');
-        const trashBinBtn = unifiedPanel.querySelector('#trash-bin-btn');
-        const dcount = Storage.getDeletedHomeworks().length;
-        if (trashCountSpan) trashCountSpan.textContent = dcount > 0 ? `回收站 (${dcount})` : '回收站';
-        if (trashBinBtn) trashBinBtn.classList.toggle('has-items', dcount > 0);
-      }
-    } catch {}
-    });
-    });
-
-    // 永久删除
-    modal.querySelectorAll('.permanent-delete-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-    const assignmentId = btn.getAttribute('data-assignment-id');
-    const trashItem = btn.closest('.trash-item');
-    const title = trashItem.querySelector('.trash-item-title').textContent;
-
-    if (confirm(`确定要永久删除作业"${title}"吗？此操作不可恢复！`)) {
-      Storage.removeDeletedHomework(assignmentId);
-      trashItem.remove();
-
-      NotificationManager.show('已删除', `作业"${title}"已永久删除`);
-
-      // 更新按钮数量显示和状态
-      const remainingItems = modal.querySelectorAll('.trash-item');
-      const clearBtn = modal.querySelector('.clear-all-btn');
-      clearBtn.textContent = `清空回收站 (${remainingItems.length})`;
-
-      if (remainingItems.length === 0) {
-        modal.querySelector('.trash-bin-body').innerHTML = '<div class="empty-trash">回收站为空<br><small>删除的作业会暂时保存在这里</small></div>';
-        clearBtn.disabled = true;
-      }
-    }
-    });
-    });
   }
 
   // ===== 辅助方法实现 =====
@@ -3065,6 +1427,7 @@ export class UCloudEnhancer {
     try { this._homeSimplifyCleanup(); } catch (e) { LOG.debug('Cleanup home simplify failed:', e); }
     this._homeSimplifyCleanup = null;
     }
+    this.homework.destroy();
     this.setThemeActive(false);
   }
 
@@ -4276,7 +2639,7 @@ export class UCloudEnhancer {
 
     if (confirm(`确定要清空回收站中的 ${deletedHomeworks.length} 个作业吗？此操作不可恢复！`)) {
       Storage.clearDeletedHomeworks();
-      this.updateTrashBinSummary();
+      this.homework.updateTrashBinSummary();
       updateButtonState();
       notifySettingsSaved();
     }
@@ -4295,12 +2658,10 @@ export class UCloudEnhancer {
     const cur = GM_getValue('DEBUG', false);
     const next = !cur;
     GM_setValue('DEBUG', next);
-    DEBUG = next;
+    setDebugFlag(next);
     NotificationManager.show('提示', next ? 'DEBUG 已开启' : 'DEBUG 已关闭');
     });
   }
-
-  // removed dead: destroy
 
   async handleCoursesPage() {
     const enableNewView = Settings.get('home', 'enableNewView');
