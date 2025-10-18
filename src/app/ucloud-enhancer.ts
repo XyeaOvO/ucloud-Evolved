@@ -2,7 +2,7 @@
 import { VERSION, CONSTANTS, SVG_ICONS } from "../constants";
 import { LOG, UEP_LOG, setDebugFlag } from "../core/logger";
 import { Utils } from "../utils";
-import { Settings, SETTINGS_SECTIONS } from "../settings";
+import { Settings, SETTINGS_SECTIONS, SettingChange } from "../settings";
 import { DownloadManager } from "../services/download-manager";
 import { CourseExtractor } from "../services/course-extractor";
 import { NotificationManager } from "../services/notification-manager";
@@ -42,6 +42,15 @@ export class UCloudEnhancer {
       "clear-deleted-homeworks-btn": {
         onClick: () => this.handleClearDeletedHomeworks(),
         getState: () => this.getClearDeletedHomeworkButtonState(),
+      },
+      "settings-export": {
+        onClick: () => this.handleSettingsExport(),
+      },
+      "settings-import": {
+        onClick: () => this.handleSettingsImport(),
+      },
+      "settings-reset": {
+        onClick: () => this.handleSettingsReset(),
       },
     },
     onSave: (changes) => this.handleSettingsSaved(changes),
@@ -1203,6 +1212,18 @@ export class UCloudEnhancer {
     if (!detail?.data?.assignmentResource) return;
 
     const resources = detail.data.assignmentResource;
+    const courseNameCandidates = [
+      detail?.data?.courseName,
+      detail?.data?.courseTitle,
+      detail?.data?.course?.courseName,
+      detail?.data?.course?.name,
+      detail?.data?.courseInfo?.courseName,
+      detail?.data?.courseInfo?.name,
+    ];
+    const courseName =
+      courseNameCandidates
+        .map((value) => (typeof value === "string" ? value.trim() : ""))
+        .find((value) => value.length) || this.getCurrentCourseTitle();
     const previewCache = new Map();
     const resolveFilename = (res, index) => {
     return res?.resourceName
@@ -1307,6 +1328,7 @@ export class UCloudEnhancer {
 
     resources.forEach((resource, index) => {
     const filename = resolveFilename(resource, index);
+    const downloadName = this.resolveSingleFileName(filename, courseName, `附件-${index + 1}`);
     const targetNode = pickNodeForResource(resource, index, filename);
     if (!targetNode) return;
 
@@ -1333,11 +1355,10 @@ export class UCloudEnhancer {
       try {
         if (Settings.get('preview', 'autoDownload')) {
           const useGM = typeof GM_download === 'function';
-          const safeName = Utils.sanitizeFilename(filename);
           if (useGM) {
-            await this.downloadManager.downloadViaGM(finalPreviewUrl, safeName, true);
+            await this.downloadManager.downloadViaGM(finalPreviewUrl, downloadName, true);
           } else {
-            await this.downloadManager.downloadFile(finalPreviewUrl, safeName);
+            await this.downloadManager.downloadFile(finalPreviewUrl, downloadName);
           }
         }
       } catch (e) {
@@ -1367,11 +1388,10 @@ export class UCloudEnhancer {
 
       try {
         const useGM = typeof GM_download === 'function';
-        const safeName = Utils.sanitizeFilename(filename);
         if (useGM) {
-          await this.downloadManager.downloadViaGM(finalPreviewUrl, safeName, true);
+          await this.downloadManager.downloadViaGM(finalPreviewUrl, downloadName, true);
         } else {
-          await this.downloadManager.downloadFile(finalPreviewUrl, safeName);
+          await this.downloadManager.downloadFile(finalPreviewUrl, downloadName);
         }
       } catch (e) {
         LOG.error('Download failed:', e);
@@ -1456,6 +1476,8 @@ export class UCloudEnhancer {
     const previewItems = Utils.$x(CONSTANTS.SELECTORS.previewItems);
 
     if (!resourceItems.length) return;
+
+    const courseName = this.getCurrentCourseTitle();
 
     const getResourceId = (res) => {
     if (!res || typeof res !== 'object') return null;
@@ -1646,13 +1668,20 @@ export class UCloudEnhancer {
     }
     }
 
+    const rawName =
+      resource?.name ||
+      resource?.resourceName ||
+      resource?.fileName ||
+      `文件_${index + 1}`;
+    const downloadName = this.resolveSingleFileName(rawName, courseName, `文件_${index + 1}`);
+
     // 自动下载功能
     if (Settings.get('preview', 'autoDownload') && previewEl && !previewEl.dataset.uepAutoDownloadBound) {
     previewEl.dataset.uepAutoDownloadBound = '1';
     previewEl.addEventListener('click', async () => {
       try {
         const { previewUrl } = await API.getPreviewURL(resource.id);
-        await this.downloadManager.downloadFile(previewUrl, resource.name);
+        await this.downloadManager.downloadFile(previewUrl, downloadName);
       } catch (error) {
         LOG.error('Auto download error:', error);
       }
@@ -1662,7 +1691,7 @@ export class UCloudEnhancer {
     // 显示所有下载按钮
     if (Settings.get('course', 'showAllDownloadButton') && !element.dataset.uepDownloadButtonBound) {
     element.dataset.uepDownloadButtonBound = '1';
-    this.addDownloadButton(element, resource, index);
+    this.addDownloadButton(element, resource, index, downloadName);
     }
     });
 
@@ -1686,7 +1715,7 @@ export class UCloudEnhancer {
 
 
 
-  addDownloadButton(container, resource, index) {
+  addDownloadButton(container, resource, index, resolvedName) {
     const downloadBtn = document.createElement('i');
     downloadBtn.title = '下载';
     downloadBtn.classList.add('by-icon-download', 'btn-icon', 'visible');
@@ -1709,11 +1738,16 @@ export class UCloudEnhancer {
     try {
     const { previewUrl } = await API.getPreviewURL(resource.id);
     const useGM = typeof GM_download === 'function';
+    const fallbackName = resolvedName && typeof resolvedName === 'string' ? resolvedName : this.resolveSingleFileName(
+      resource?.name || resource?.resourceName || resource?.fileName || `文件_${index + 1}`,
+      this.getCurrentCourseTitle(),
+      `文件_${index + 1}`
+    );
     if (useGM) {
       // 单文件默认询问保存位置（更贴合用户期望）
-      await this.downloadManager.downloadViaGM(previewUrl, Utils.sanitizeFilename(resource.name), true);
+      await this.downloadManager.downloadViaGM(previewUrl, fallbackName, true);
     } else {
-      await this.downloadManager.downloadFile(previewUrl, Utils.sanitizeFilename(resource.name));
+      await this.downloadManager.downloadFile(previewUrl, fallbackName);
     }
     } catch (error) {
     LOG.error('Download error:', error);
@@ -1935,6 +1969,7 @@ export class UCloudEnhancer {
     if (!Number.isFinite(concurrency) || concurrency < 1) concurrency = 1;
     concurrency = Math.min(10, Math.floor(concurrency));
     let nextIndex = 0;
+    const courseName = this.getCurrentCourseTitle();
 
     const fetchPreview = async (id) => {
     let attempt = 0;
@@ -1954,7 +1989,11 @@ export class UCloudEnhancer {
     const index = nextIndex++;
     if (index >= resources.length) return;
     const resource = resources[index];
-    const safeName = Utils.sanitizeFilename(resource.name || `file_${index + 1}`);
+    const downloadName = this.resolveSingleFileName(
+      resource?.name || resource?.resourceName || resource?.fileName || `file_${index + 1}`,
+      courseName,
+      `file_${index + 1}`
+    );
 
     let attempt = 0;
     const maxAttempts = 5;
@@ -1963,9 +2002,9 @@ export class UCloudEnhancer {
         const { previewUrl } = await fetchPreview(resource.id);
         if (!this.isBatchDownloading) return;
         if (useGM) {
-        await this.downloadManager.downloadViaGM(previewUrl, safeName, false);
+        await this.downloadManager.downloadViaGM(previewUrl, downloadName, false);
         } else {
-        await this.downloadManager.downloadFile(previewUrl, safeName);
+        await this.downloadManager.downloadFile(previewUrl, downloadName);
         }
         await Utils.sleep(300 + Math.random() * 400);
         break;
@@ -2077,14 +2116,14 @@ export class UCloudEnhancer {
     this.settingsPanel.refresh();
   }
 
-  private handleSettingsSaved(changes = []): void {
+  private handleSettingsSaved(changes: SettingChange[] = [], notify = true): void {
     const showToggle = Settings.get("system", "showConfigButton");
     this.settingsPanel.setToggleVisibility(showToggle);
     this.settingsPanel.refreshAction("clear-deleted-homeworks-btn");
     let shouldUpdateConcurrency = false;
     let shouldRefreshNotifications = false;
-    (Array.isArray(changes) ? changes : []).forEach((change) => {
-      if (!change || typeof change !== "object") return;
+    (changes || []).forEach((change) => {
+      if (!change) return;
       const { category, key } = change;
       if (category === "course" && key === "downloadConcurrency") {
         shouldUpdateConcurrency = true;
@@ -2099,7 +2138,9 @@ export class UCloudEnhancer {
     if (shouldRefreshNotifications && isNotificationRoute()) {
       this.handleNotificationPage(true);
     }
-    NotificationManager.show("设置已保存", "刷新页面后生效");
+    if (notify) {
+      NotificationManager.show("设置已保存", "刷新页面后生效");
+    }
   }
 
   private handleClearDeletedHomeworks(): void {
@@ -2125,6 +2166,80 @@ export class UCloudEnhancer {
     };
   }
 
+  private async handleSettingsExport(): Promise<void> {
+    try {
+      const data = Settings.exportAll();
+      const json = JSON.stringify(data, null, 2);
+      let copied = false;
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(json);
+          copied = true;
+        } catch (error) {
+          LOG.debug("复制配置到剪贴板失败:", error);
+        }
+      }
+      if (!copied) {
+        window.prompt("以下为当前配置，可手动复制保存：", json);
+      }
+      NotificationManager.show(
+        "导出成功",
+        copied ? "配置已复制到剪贴板" : "请手动复制弹窗中的配置"
+      );
+    } catch (error) {
+      LOG.error("导出配置失败:", error);
+      NotificationManager.show(
+        "导出失败",
+        error instanceof Error ? error.message : String(error),
+        "error"
+      );
+    }
+  }
+
+  private async handleSettingsImport(): Promise<void> {
+    const input = window.prompt("请粘贴配置 JSON：", "");
+    if (input === null) return;
+    const trimmed = input.trim();
+    if (!trimmed.length) return;
+    try {
+      const parsed = JSON.parse(trimmed);
+      const changes = Settings.importAll(parsed);
+      if (!changes.length) {
+        NotificationManager.show("提示", "未检测到需要更新的配置");
+        return;
+      }
+      this.settingsPanel.refresh();
+      this.handleSettingsSaved(changes, false);
+      NotificationManager.show("导入成功", "配置已应用");
+    } catch (error) {
+      LOG.error("导入配置失败:", error);
+      NotificationManager.show(
+        "导入失败",
+        error instanceof Error ? error.message : String(error),
+        "error"
+      );
+    }
+  }
+
+  private handleSettingsReset(): void {
+    if (!window.confirm("确定要恢复所有设置为默认值吗？此操作不可撤销。")) {
+      return;
+    }
+    try {
+      const changes = Settings.resetAll();
+      this.settingsPanel.refresh();
+      this.handleSettingsSaved(changes, false);
+      NotificationManager.show("已恢复默认", "设置已恢复为默认值");
+    } catch (error) {
+      LOG.error("重置配置失败:", error);
+      NotificationManager.show(
+        "重置失败",
+        error instanceof Error ? error.message : String(error),
+        "error"
+      );
+    }
+  }
+
   private applyDownloadConcurrency(): void {
     let concurrency = Number(Settings.get("course", "downloadConcurrency"));
     if (!Number.isFinite(concurrency)) concurrency = 1;
@@ -2133,6 +2248,11 @@ export class UCloudEnhancer {
   }
 
   private resolveZipFilename(courseName?: string | null): string {
+    const base = this.resolveDownloadBasename(courseName);
+    return base.toLowerCase().endsWith(".zip") ? base : `${base}.zip`;
+  }
+
+  private resolveDownloadBasename(courseName?: string | null): string {
     const templateRaw = Settings.get("course", "downloadNameTemplate");
     const template =
       typeof templateRaw === "string" && templateRaw.trim().length
@@ -2156,7 +2276,50 @@ export class UCloudEnhancer {
       resolved = `${fallbackCourse}-${timestamp}`;
     }
     const sanitized = Utils.sanitizeFilename(resolved);
-    return sanitized.toLowerCase().endsWith(".zip") ? sanitized : `${sanitized}.zip`;
+    return sanitized || "课程资源";
+  }
+
+  private resolveSingleFileName(
+    resourceName: string | null | undefined,
+    courseName?: string | null,
+    fallback?: string
+  ): string {
+    const pickName = (...candidates: Array<string | null | undefined>): string => {
+      for (const candidate of candidates) {
+        if (typeof candidate === "string") {
+          const trimmed = candidate.trim();
+          if (trimmed.length) {
+            return trimmed;
+          }
+        }
+      }
+      return "file";
+    };
+
+    const rawName = pickName(resourceName, fallback);
+    let sanitizedResource = Utils.sanitizeFilename(rawName);
+    if (
+      sanitizedResource === "file" &&
+      typeof fallback === "string" &&
+      fallback.trim().length &&
+      fallback.trim() !== rawName
+    ) {
+      sanitizedResource = Utils.sanitizeFilename(fallback);
+    }
+
+    const base = this.resolveDownloadBasename(courseName);
+    const prefix = base.replace(/\\.zip$/i, "").trim() || base;
+    if (!prefix.length) {
+      return sanitizedResource;
+    }
+
+    const dotIndex = sanitizedResource.lastIndexOf(".");
+    const namePart = dotIndex >= 0 ? sanitizedResource.slice(0, dotIndex) : sanitizedResource;
+    const ext = dotIndex >= 0 ? sanitizedResource.slice(dotIndex) : "";
+    const effectiveName = namePart.trim().length ? namePart : "file";
+    const combined = [prefix, effectiveName].filter(Boolean).join("-");
+    const sanitizedCombined = Utils.sanitizeFilename(combined);
+    return ext ? `${sanitizedCombined}${ext}` : sanitizedCombined;
   }
 
   registerMenuCommands() {
