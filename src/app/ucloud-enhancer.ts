@@ -9,6 +9,7 @@ import { NotificationManager } from "../services/notification-manager";
 import { HomeworkModule } from "./homework/module";
 import { SettingsPanel } from "./settings/panel";
 import { isCourseRoute, isNotificationRoute } from "./routing";
+import { handleCoursesPage as handleCoursesPageFlow } from "./pages/course-list";
 import { API, AssignmentSummary, UndoneListResponse } from "../core/api";
 import { Storage, StoredCourseInfo } from "../core/storage";
 
@@ -2344,86 +2345,14 @@ export class UCloudEnhancer {
   }
 
   async handleCoursesPage() {
-    const enableNewView = Settings.get('home', 'enableNewView');
-    this.setThemeActive(enableNewView);
-    if (Settings.get('system', 'betterTitle')) {
-    document.title = '我的课程 - 教学云空间';
-    }
-
-    // 检查是否开启新版视图功能
-    if (!enableNewView) {
-    return;
-    }
-
-    // 增加更严格的页面检查，确保真正在课程页面上
-    const isReallyCoursePage = isCourseRoute();
-
-    // 检查是否为通知页面
-    const isNotificationPage = isNotificationRoute();
-
-    if (!isReallyCoursePage || isNotificationPage) {
-    return;
-    }
-
-    // 优先检查DOM中是否存在课程相关元素，不存在则直接返回
-    if (!Utils.qs('.my-lesson-section') &&
-    !Utils.qs('.el-carousel__item')) {
-    LOG.debug('未检测到课程页面DOM元素，跳过处理');
-    return;
-    }
-
-    try {
-    await Utils.wait(() => Utils.qs('.my-lesson-section'), {
-    timeout: 8000,
-    observerOptions: { childList: true, subtree: true }
+    await handleCoursesPageFlow({
+      courseExtractor: this.courseExtractor,
+      setThemeActive: (active: boolean) => this.setThemeActive(active),
+      getRetryTimer: () => this._courseExtractorRetryTimer,
+      setRetryTimer: (timer: number | null) => {
+        this._courseExtractorRetryTimer = timer;
+      },
     });
-    } catch (e) {
-    LOG.error('等待课程容器超时:', e);
-    return;
-    }
-
-    try {
-    const success = await this.courseExtractor.extractCourses();
-    if (success) {
-    const displaySuccess = this.courseExtractor.displayCourses();
-
-    if (displaySuccess) {
-      // 隐藏原始容器
-      this.courseExtractor.toggleOriginalContainer(false);
-    } else {
-      LOG.error('课程显示失败');
-      this.courseExtractor.toggleOriginalContainer(true);
-    }
-    } else {
-    this.courseExtractor.toggleOriginalContainer(true);
-    NotificationManager.show('正在加载', '首次提取失败，5秒后自动重试...', 'info');
-
-    if (this._courseExtractorRetryTimer) {
-      clearTimeout(this._courseExtractorRetryTimer);
-    }
-    this._courseExtractorRetryTimer = window.setTimeout(async () => {
-      this._courseExtractorRetryTimer = null;
-      if (!isCourseRoute() || isNotificationRoute()) return;
-      const retrySuccess = await this.courseExtractor.extractCourses({ force: true });
-      if (retrySuccess) {
-        const displaySuccess = this.courseExtractor.displayCourses();
-        if (displaySuccess) {
-        this.courseExtractor.toggleOriginalContainer(false);
-        } else {
-        this.courseExtractor.toggleOriginalContainer(true);
-        }
-      } else {
-        LOG.error('多次尝试后仍无法提取课程');
-        NotificationManager.show('提取失败', '无法提取课程列表，请刷新页面重试', 'error');
-        this.courseExtractor.toggleOriginalContainer(true);
-      }
-    }, 5000);
-    }
-    } catch (error) {
-    LOG.error('处理课程页面时出错:', error);
-    NotificationManager.show('发生错误', '处理课程页面时出错: ' + error.message, 'error');
-    this.courseExtractor.toggleOriginalContainer(true);
-    }
   }
 
   handleNotificationPage(forceRefresh = false) {
