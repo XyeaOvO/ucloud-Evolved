@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { CONSTANTS } from "../../constants";
 import { API } from "../../core/api";
 import { LOG } from "../../core/logger";
@@ -39,6 +38,27 @@ interface ResolvedResource {
   previewEl: HTMLElement | null;
 }
 
+const getResourceId = (res: CourseResource | null | undefined): string | null => {
+  if (!res) return null;
+  const storageIdCandidate =
+    res.storage && typeof res.storage === "object"
+      ? ((res.storage as { id?: ResourceIdentifier }).id ?? null)
+      : null;
+  const candidates: ResourceIdentifier[] = [
+    res.id,
+    res.resourceId,
+    res.storageId,
+    res.attachmentId,
+    storageIdCandidate,
+  ];
+  for (const candidate of candidates) {
+    if (candidate !== undefined && candidate !== null && candidate !== "") {
+      return String(candidate);
+    }
+  }
+  return null;
+};
+
 const describeError = (error: unknown): string =>
   error instanceof Error ? error.message : String(error ?? "未知错误");
 
@@ -66,27 +86,6 @@ export async function setupCourseResources(
 
   const courseName = context.getCurrentCourseTitle();
 
-  const getResourceId = (res: CourseResource | null | undefined): string | null => {
-    if (!res) return null;
-    const storageIdCandidate =
-      res.storage && typeof res.storage === "object"
-        ? ((res.storage as { id?: ResourceIdentifier }).id ?? null)
-        : null;
-    const candidates: ResourceIdentifier[] = [
-      res.id,
-      res.resourceId,
-      res.storageId,
-      res.attachmentId,
-      storageIdCandidate,
-    ];
-    for (const candidate of candidates) {
-      if (candidate !== undefined && candidate !== null && candidate !== "") {
-        return String(candidate);
-      }
-    }
-    return null;
-  };
-
   const resourceById = new Map<string, CourseResource>();
   const resourceNameBuckets = new Map<string, CourseResource[]>();
   resources.forEach((res) => {
@@ -113,7 +112,7 @@ export async function setupCourseResources(
     const stack: Element[] = [root];
     while (stack.length) {
       const node = stack.pop()!;
-      if (node.dataset) {
+      if (node instanceof HTMLElement && node.dataset) {
         Object.entries(node.dataset).forEach(([key, value]) => {
           if (!value) return;
           if (idAttrRegex.test(key) || key === "id") {
@@ -121,7 +120,7 @@ export async function setupCourseResources(
           }
         });
       }
-      Array.from(node.attributes || []).forEach((attr) => {
+      Array.from(node.attributes ?? []).forEach((attr) => {
         const value = attr?.value;
         if (!value) return;
         if (idAttrRegex.test(attr.name) || attr.name === "data-id") {
@@ -168,8 +167,6 @@ export async function setupCourseResources(
           // ignore selector errors
         }
       }
-    } else if (root && typeof root.textContent === "string") {
-      push(root.textContent);
     }
     nameCandidateCache.set(root, out);
     return out;
@@ -306,11 +303,9 @@ export async function setupCourseResources(
 }
 
 export function resolveDownloadBasename(courseName?: string | null): string {
-  const templateRaw = Settings.get("course", "downloadNameTemplate");
-  const template =
-    typeof templateRaw === "string" && templateRaw.trim().length
-      ? templateRaw.trim()
-      : "{{course}}-{{date}}";
+  const templateSetting = Settings.get<string>("course", "downloadNameTemplate");
+  const templateValue = typeof templateSetting === "string" ? templateSetting.trim() : "";
+  const template = templateValue.length ? templateValue : "{{course}}-{{date}}";
   const fallbackCourse =
     courseName && String(courseName).trim() ? String(courseName).trim() : "课程资源";
   const timestamp = Utils.formatDateForFilename();
@@ -616,7 +611,9 @@ function addBatchDownloadButton(context: CourseResourceContext, resources: Cours
     </div>
     `;
 
-  const resourceList = Utils.$x("/html/body/div/div/div[2]/div[2]/div/div/div");
+  const resourceList = Utils.$x("/html/body/div/div/div[2]/div[2]/div/div/div").filter(
+    (node): node is HTMLElement => node instanceof HTMLElement
+  );
   if (!resourceList.length) return;
 
   const containerElement = document.createElement("div");
